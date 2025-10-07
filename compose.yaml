@@ -11,9 +11,18 @@ services:
     container_name: opensentry
     ports:
       - "5000:5000"
+    environment:
+      # Change these defaults in production
+      - OPENSENTRY_USER=admin
+      - OPENSENTRY_PASS=admin
+      - OPENSENTRY_SECRET=please-change-me
+      - OPENSENTRY_LOG_LEVEL=INFO
     volumes:
       - ./archives:/app/archives
     devices:
       - /dev/video0:/dev/video0
-    # restart: unless-stopped
-    # privileged: true            # only if needed for camera access
+    # - /dev/video1:/dev/video1
+    group_add:
+      - video
+    restart: unless-stopped
+    # privileged: true            # only if needed for camera access (try without first)

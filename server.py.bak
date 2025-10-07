@@ -822,17 +822,6 @@ def archives_unknown_faces():
         </div>
         """
         rows.append(row)
-    css = get_css() + """
-      .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap:12px; padding:10px; }
-      .card { border:1px solid var(--border); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; background:#0e131b; }
-      .img img { width:100%; display:block; }
-      .meta { padding:8px; display:flex; justify-content:space-between; align-items:center; color:var(--muted); }
-      .actions { display:flex; gap:8px; padding:8px; align-items:center; border-top:1px solid var(--border); flex-wrap: wrap; }
-      .actions input[type=text] { flex: 1; min-width:0; padding:8px 10px; background:#0e131b; color:var(--text); border:1px solid var(--border); border-radius:8px; }
-      .actions button { padding:8px 12px; background: var(--accent); color:#fff; border:0; border-radius:8px; font-weight:600; cursor:pointer; }
-    """
-    hdr = header_html('Unknown Faces')
-
     html = f"""
     <!DOCTYPE html>
     <html lang='en'>
@@ -840,10 +829,30 @@ def archives_unknown_faces():
       <meta charset='utf-8'>
       <meta name='viewport' content='width=device-width, initial-scale=1'>
       <title>Unknown Faces</title>
-      <style>{css}</style>
+      <style>
+        :root {{ --bg:#0b0e14; --surface:#11161f; --text:#eaeef2; --muted:#93a3b5; --border:#2a3342; --accent:#3b82f6; }}
+        * {{ box-sizing: border-box; }}
+        body {{ margin:0; background:var(--bg); color:var(--text); font-family: system-ui, Arial, sans-serif; }}
+        a {{ color: var(--accent); text-decoration: none; }}
+        a:hover {{ text-decoration: underline; }}
+        header {{ background: var(--surface); border-bottom:1px solid var(--border); padding:10px 16px; display:flex; gap:12px; align-items:center; }}
+        header .spacer {{ flex:1; }}
+        header .links a {{ margin-left:12px; color: var(--muted); }}
+        .grid {{ display:grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap:12px; padding:10px; }}
+        .card {{ border:1px solid var(--border); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; background:#0e131b; }}
+        .img img {{ width:100%; display:block; }}
+        .meta {{ padding:8px; display:flex; justify-content:space-between; align-items:center; color:var(--muted); }}
+        .actions {{ display:flex; gap:8px; padding:8px; align-items:center; border-top:1px solid var(--border); flex-wrap: wrap; }}
+        .actions input[type=text] {{ flex: 1; min-width:0; padding:8px 10px; background:#0e131b; color:var(--text); border:1px solid var(--border); border-radius:8px; }}
+        .actions button {{ padding:8px 12px; background: var(--accent); color:#fff; border:0; border-radius:8px; font-weight:600; cursor:pointer; }}
+      </style>
     </head>
     <body>
-      {hdr}
+      <header>
+        <strong>Unknown Faces</strong>
+        <div class='spacer'></div>
+        <div class='links'><a href='/'>Home</a> · <a href='/settings'>Settings</a> · <a href='/logout'>Logout</a></div>
+      </header>
       <div class='grid'>
         {''.join(rows)}
       </div>
@@ -1106,6 +1115,47 @@ def settings():
         face_recognition_available=face_recognition_available,
         unknowns=unknowns_for_ui,
     )
+    # Apply dark theme like login
+    _start = page_html.find('<style>')
+    _end = page_html.find('</style>', _start)
+    if _start != -1 and _end != -1:
+        _css = get_css() + (
+            '.form-wrap { max-width: 1040px; margin: 0 auto; padding: 16px; }'
+            'fieldset { border: 1px solid var(--border); background: var(--surface); border-radius: 10px; padding: 14px; margin-top: 14px; }'
+            'legend { color: var(--muted); }'
+            '.options-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px 16px; align-items: center; }'
+            '.options-grid label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }'
+            '.status-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px 14px; align-items: center; }'
+            '.status-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background:#0e131b; }'
+            '.pill { padding: 2px 10px; border-radius: 12px; font-weight: 600; font-size: 0.9em; border: 1px solid transparent; }'
+            '.pill.ok { background: rgba(22,163,74,0.15); color: #86efac; border-color: rgba(22,163,74,0.35); }'
+            '.pill.down { background: rgba(239,68,68,0.15); color: #fecaca; border-color: rgba(239,68,68,0.35); }'
+            '.md-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px 18px; align-items: start; }'
+            '.md-grid .control { display: flex; flex-direction: column; gap: 6px; }'
+            '.md-grid .control .control-title { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; color: var(--muted); }'
+            '.md-grid .control output { font-variant-numeric: tabular-nums; min-width: 3ch; text-align: right; color: var(--text); }'
+            'input[type=range] { width: 100%; accent-color: var(--accent); }'
+            'input[type=text] { background:#0e131b; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 10px; }'
+            'input[type=checkbox], input[type=radio] { accent-color: var(--accent); }'
+            'button { background: var(--accent); color:#fff; border:0; padding:8px 12px; border-radius:8px; font-weight:600; cursor:pointer; }'
+            'button:hover { filter: brightness(1.05); }'
+            '.unknowns-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap:12px; }'
+            '.unknowns-grid .card { border:1px solid var(--border); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; background:#0e131b; }'
+            '.unknowns-grid .img img { width:100%; display:block; }'
+            '.unknowns-grid .meta { padding:8px; display:flex; justify-content:space-between; align-items:center; color:var(--muted); }'
+            '.unknowns-grid .actions { display:flex; gap:8px; padding:8px; align-items:center; border-top:1px solid var(--border); flex-wrap: wrap; }'
+            '.unknowns-grid .actions input[type=text] { flex: 1 1 240px; min-width: 240px; padding:8px; font-size: 14px; }'
+            '.unknowns-grid .actions button { padding:8px 12px; }'
+        )
+        page_html = page_html[:_start+7] + _css + page_html[_end:]
+
+    _c1 = page_html.find('<center>')
+    if _c1 != -1:
+        _c2 = page_html.find('</center>', _c1)
+        if _c2 != -1:
+            _header = header_html('Settings')
+            page_html = page_html[:_c1] + _header + page_html[_c2+9:]
+
     return page_html
 
 @app.route('/video_feed')

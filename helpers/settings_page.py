@@ -1,4 +1,5 @@
 from typing import Set, List
+from helpers.theme import get_css, header_html
 
 
 def render_settings_page(
@@ -79,6 +80,36 @@ def render_settings_page(
         </fieldset>
         """
 
+    css = get_css() + """
+            .form-wrap { max-width: 1040px; margin: 0 auto; padding: 16px; }
+            fieldset { border: 1px solid var(--border); background: var(--surface); border-radius: 10px; padding: 14px; margin-top: 14px; }
+            legend { color: var(--muted); }
+            .options-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px 16px; align-items: center; }
+            .options-grid label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+            .status-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px 14px; align-items: center; }
+            .status-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background:#0e131b; }
+            .pill { padding: 2px 10px; border-radius: 12px; font-weight: 600; font-size: 0.9em; border: 1px solid transparent; }
+            .pill.ok { background: rgba(22,163,74,0.15); color: #86efac; border-color: rgba(22,163,74,0.35); }
+            .pill.down { background: rgba(239,68,68,0.15); color: #fecaca; border-color: rgba(239,68,68,0.35); }
+            .md-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px 18px; align-items: start; }
+            .md-grid .control { display: flex; flex-direction: column; gap: 6px; }
+            .md-grid .control .control-title { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; color: var(--muted); }
+            .md-grid .control output { font-variant-numeric: tabular-nums; min-width: 3ch; text-align: right; color: var(--text); }
+            input[type=range] { width: 100%; accent-color: var(--accent); }
+            input[type=text] { background:#0e131b; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 10px; }
+            input[type=checkbox], input[type=radio] { accent-color: var(--accent); }
+            button { background: var(--accent); color:#fff; border:0; padding:8px 12px; border-radius:8px; font-weight:600; cursor:pointer; }
+            button:hover { filter: brightness(1.05); }
+            .unknowns-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap:12px; }
+            .unknowns-grid .card { border:1px solid var(--border); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; background:#0e131b; }
+            .unknowns-grid .img img { width:100%; display:block; }
+            .unknowns-grid .meta { padding:8px; display:flex; justify-content:space-between; align-items:center; color:var(--muted); }
+            .unknowns-grid .actions { display:flex; gap:8px; padding:8px; align-items:center; border-top:1px solid var(--border); flex-wrap: wrap; }
+            .unknowns-grid .actions input[type=text] { flex: 1 1 240px; min-width: 240px; padding:8px; font-size: 14px; }
+            .unknowns-grid .actions button { padding:8px 12px; }
+    """
+    hdr = header_html('Settings')
+
     return f"""
     <!DOCTYPE html>
     <html lang=\"en\">
@@ -86,34 +117,10 @@ def render_settings_page(
         <meta charset=\"utf-8\">
         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
         <title>OpenSentry Settings</title>
-        <style>
-            body {{ font-family: system-ui, Arial, sans-serif; line-height: 1.4; }}
-            .form-wrap {{ max-width: 960px; margin: 0 auto; padding: 0 16px; }}
-            fieldset {{ border: 1px solid #ccc; border-radius: 6px; padding: 12px; margin-top: 12px; }}
-            .options-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px 16px; align-items: center; }}
-            .options-grid label {{ display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }}
-            .status-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px 14px; align-items: center; }}
-            .status-item {{ display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border: 1px solid #eee; border-radius: 6px; }}
-            .pill {{ padding: 2px 8px; border-radius: 12px; font-weight: 600; font-size: 0.9em; border: 1px solid transparent; }}
-            .pill.ok {{ background: #e6f4ea; color: #136b2d; border-color: #cde9d6; }}
-            .md-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px 18px; align-items: start; }}
-            .md-grid .control {{ display: flex; flex-direction: column; gap: 6px; }}
-            .md-grid .control .control-title {{ display: flex; gap: 8px; align-items: baseline; justify-content: space-between; }}
-            .md-grid .control output {{ font-variant-numeric: tabular-nums; min-width: 3ch; text-align: right; }}
-            .md-grid input[type=range] {{ width: 100%; }}
-            .unknowns-grid {{ display:grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap:12px; }}
-            .unknowns-grid .card {{ border:1px solid #ddd; border-radius:6px; overflow:hidden; display:flex; flex-direction:column; }}
-            .unknowns-grid .img img {{ width:100%; display:block; }}
-            .unknowns-grid .meta {{ padding:8px; display:flex; justify-content:space-between; align-items:center; }}
-            .unknowns-grid .actions {{ display:flex; gap:8px; padding:8px; align-items:center; border-top:1px solid #eee; flex-wrap: wrap; }}
-            .unknowns-grid .actions input[type=text] {{ flex: 1 1 240px; min-width: 240px; padding:8px; font-size: 14px; }}
-            .unknowns-grid .actions button {{ padding:8px 12px; }}
-        </style>
+        <style>{css}</style>
     </head>
     <body>
-        <center>
-            <p><a href=\"/\">Back to Home</a></p>
-        </center>
+        {hdr}
         <div class=\"form-wrap\">
             <fieldset>
                 <legend>Camera route status</legend>
