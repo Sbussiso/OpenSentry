@@ -1,0 +1,19 @@
+# docker compose for OpenSentry
+# Build and run on Raspberry Pi (arm64). For cross-builds, uncomment platform.
+
+services:
+  opensentry:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # platform: linux/arm64    # uncomment if building on non-ARM host with buildx
+    image: opensentry:pi
+    container_name: opensentry
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./archives:/app/archives
+    devices:
+      - /dev/video0:/dev/video0
+    # restart: unless-stopped
+    # privileged: true            # only if needed for camera access
