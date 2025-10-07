@@ -2,6 +2,7 @@ import os
 import time
 import threading
 import requests
+import pytest
 
 # Simple smoke tests that the container/server exposes /status
 # These are designed to run in GitHub Actions by hitting the exposed port
@@ -11,6 +12,9 @@ TOKEN = os.environ.get("OPENSENTRY_API_TOKEN", "")
 
 
 def test_status_without_token_ok_when_no_token_configured():
+    # If the app is configured with a token, skip this test.
+    if TOKEN:
+        pytest.skip("OPENSENTRY_API_TOKEN set; skipping unauthenticated /status test")
     # If token is not set in the app, /status should respond 200 without auth
     # In CI, the first job doesn't set a token, so this should pass.
     r = requests.get(f"{BASE}/status", timeout=5)

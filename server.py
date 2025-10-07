@@ -6,6 +6,7 @@ import logging
 import atexit
 import numpy as np
 import uuid
+import socket
 try:
     import face_recognition  # type: ignore
 except Exception:
@@ -306,11 +307,27 @@ def _start_mdns_advertiser():
     except Exception as e:
         logger.warning('mDNS advertise failed: %s', e)
 
-# Start advertiser on import
-try:
-    _start_mdns_advertiser()
-except Exception:
-    pass
+
+
+def _find_available_port(start_port: int, attempts: int = 10) -> int:
+    """Find a free TCP port starting at start_port, trying up to attempts times."""
+    for i in range(max(1, attempts)):
+        p = start_port + i
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            # Allow quick reuse so the probe doesn't hold the port
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(('0.0.0.0', p))
+            s.close()
+            return p
+        except OSError:
+            try:
+                s.close()
+            except Exception:
+                pass
+            continue
+    return start_port
+
 
 def generate_frames():
     """Generator function that yields raw frames in MJPEG format"""
@@ -1252,11 +1269,26 @@ def video_feed_motion():
 
 
 def main():
+    global APP_PORT
     logger.info("Starting OpenSentry camera server...")
     logger.info("Starting camera stream...")
     camera_stream.start()
-    logger.info("Access the feed at http://0.0.0.0:5000/video_feed")
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    # Choose a port (default 5000). If busy, try the next few ports.
+    try:
+        preferred = int(os.environ.get('OPENSENTRY_PORT', str(APP_PORT or 5000)))
+    except Exception:
+        preferred = 5000
+    chosen = _find_available_port(preferred, attempts=10)
+    # Update global APP_PORT so /status and mDNS advertise correctly
+    APP_PORT = chosen
+    logger.info("Binding HTTP server on port %d (preferred %d)", chosen, preferred)
+    logger.info("Access the feed at http://0.0.0.0:%d/video_feed", chosen)
+    # Start mDNS advertisement after selecting the port
+    try:
+        _start_mdns_advertiser()
+    except Exception:
+        pass
+    app.run(host='0.0.0.0', port=chosen, debug=False, threaded=True)
 
 
 if __name__ == "__main__":

@@ -49,12 +49,13 @@ services:
     image: opensentry:pi
     container_name: opensentry
     ports:
-      - "5000:5000"
+      - "${OPENSENTRY_PORT:-5000}:${OPENSENTRY_PORT:-5000}"
     environment:
       - OPENSENTRY_USER=admin
       - OPENSENTRY_PASS=admin
       - OPENSENTRY_SECRET=please-change-me
       - OPENSENTRY_LOG_LEVEL=INFO
+      - OPENSENTRY_PORT=${OPENSENTRY_PORT:-5000}
       # Optional discovery metadata and protection for /status
       # - OPENSENTRY_DEVICE_NAME=Garage Cam
       # - OPENSENTRY_API_TOKEN=your-ci-or-command-token
@@ -75,7 +76,7 @@ Environment variables
 - OPENSENTRY_SECRET=please-change-me
 - OPENSENTRY_LOG_LEVEL=INFO  (INFO, DEBUG)
 - OPENSENTRY_CAMERA_INDEX=0  (preferred index; auto-probes 0..5)
-- OPENSENTRY_PORT=5000       (metadata only; container listens on 5000)
+- OPENSENTRY_PORT=5000       (preferred HTTP port; app will fall back to the next free port if busy)
 - OPENSENTRY_DEVICE_NAME=OpenSentry  (shown in header and mDNS TXT)
 - OPENSENTRY_API_TOKEN=      (if set, `/status` requires Authorization: Bearer <token>)
 - OPENSENTRY_MDNS_DISABLE=0  (set to 1 to disable mDNS advertisement)
@@ -139,6 +140,18 @@ If `OPENSENTRY_API_TOKEN` is set, call with a bearer token:
 ```bash
 curl -H "Authorization: Bearer $OPENSENTRY_API_TOKEN" http://<ip>:5000/status
 ```
+
+Port selection and multiple instances
+-------------------------------------
+- The server binds to `OPENSENTRY_PORT` (default `5000`). If that port is busy, it tries `+1` up to 10 attempts (e.g., 5001, 5002...).
+- `/status` and the mDNS advertisement include the actual bound `port`.
+- Docker Compose: the example maps host and container ports using the same `OPENSENTRY_PORT` value so discovery matches host reachability.
+- To run multiple instances on one host (Compose):
+  ```bash
+  OPENSENTRY_PORT=5000 docker compose -p opensentry5000 up -d --build
+  OPENSENTRY_PORT=5001 docker compose -p opensentry5001 up -d --build
+  ```
+  Then visit `http://<host>:5000` and `http://<host>:5001` respectively.
 
 Troubleshooting
 ---------------
