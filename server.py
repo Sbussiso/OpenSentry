@@ -64,7 +64,7 @@ _LOGIN_PASS = os.environ.get('OPENSENTRY_PASS', 'admin')
 def _auth_allowed() -> bool:
     # Allow unauthenticated access to only the login route
     ep = request.endpoint or ''
-    if ep in ('login', 'static', 'health', 'favicon'):
+    if ep in ('login', 'static', 'health', 'favicon', 'status'):
         return True
     return bool(session.get('logged_in'))
 

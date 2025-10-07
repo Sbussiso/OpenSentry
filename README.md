@@ -166,5 +166,5 @@ Continuous Integration
 
 License
 -------
-MIT (see LICENSE if present)
+MIT
 
