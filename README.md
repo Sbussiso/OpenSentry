@@ -38,13 +38,54 @@ docker compose up -d
 
 The compose file publishes port 5000, maps archives to /app/archives, and (optionally) maps /dev/video0. Ensure you are using the system Docker engine (not Docker Desktop VM) to access host devices.
 
+Example `compose.yaml`:
+
+```yaml
+services:
+  opensentry:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: opensentry:pi
+    container_name: opensentry
+    ports:
+      - "5000:5000"
+    environment:
+      - OPENSENTRY_USER=admin
+      - OPENSENTRY_PASS=admin
+      - OPENSENTRY_SECRET=please-change-me
+      - OPENSENTRY_LOG_LEVEL=INFO
+      # Optional discovery metadata and protection for /status
+      # - OPENSENTRY_DEVICE_NAME=Garage Cam
+      # - OPENSENTRY_API_TOKEN=your-ci-or-command-token
+      # - OPENSENTRY_MDNS_DISABLE=0
+    volumes:
+      - ./archives:/app/archives
+    devices:
+      - /dev/video0:/dev/video0
+    group_add:
+      - video
+    restart: unless-stopped
+```
+
 Environment variables
 ---------------------
 - OPENSENTRY_USER=admin
 - OPENSENTRY_PASS=admin
 - OPENSENTRY_SECRET=please-change-me
-- OPENSENTRY_LOG_LEVEL=INFO
-- OPENSENTRY_CAMERA_INDEX=0
+- OPENSENTRY_LOG_LEVEL=INFO  (INFO, DEBUG)
+- OPENSENTRY_CAMERA_INDEX=0  (preferred index; auto-probes 0..5)
+- OPENSENTRY_PORT=5000       (metadata only; container listens on 5000)
+- OPENSENTRY_DEVICE_NAME=OpenSentry  (shown in header and mDNS TXT)
+- OPENSENTRY_API_TOKEN=      (if set, `/status` requires Authorization: Bearer <token>)
+- OPENSENTRY_MDNS_DISABLE=0  (set to 1 to disable mDNS advertisement)
+- OPENSENTRY_VERSION=0.1.0   (metadata only for discovery)
+
+Config and archives
+-------------------
+- `config.json` persists motion/object/face settings and a generated `device_id`.
+- `archives/` stores snapshots of unknown faces and manifests.
+- Both are ignored by Git (see `.gitignore`).
 
 Security notes
 --------------
@@ -67,6 +108,38 @@ Endpoints
 - `/archives/unknown_faces` – Review and promote/delete unknown faces
 - `/health` – Health check (200 OK)
 
+Discovery (mDNS + /status)
+---------------------------
+- mDNS service: `_opensentry._tcp.local` via Zeroconf.
+- TXT keys (no secrets):
+  - `id` (short persistent device id)
+  - `name` (device display name)
+  - `ver` (app version)
+  - `caps` (raw,motion,objects,faces)
+  - `auth` (token|session)
+  - `api` (`/status,/health`)
+  - `path` (`/`)
+  - `proto` (`1`)
+
+`/status` JSON:
+```json
+{
+  "id": "abc123def456",
+  "name": "OpenSentry",
+  "version": "0.1.0",
+  "port": 5000,
+  "caps": ["raw","motion","objects","faces"],
+  "routes": {"raw": true, "motion": true, "objects": true, "faces": true},
+  "camera": {"running": true, "has_frame": true},
+  "auth_mode": "token" | "session"
+}
+```
+
+If `OPENSENTRY_API_TOKEN` is set, call with a bearer token:
+```bash
+curl -H "Authorization: Bearer $OPENSENTRY_API_TOKEN" http://<ip>:5000/status
+```
+
 Troubleshooting
 ---------------
 - Can’t access camera in Docker? Ensure you’re talking to the system engine and the device exists inside the container.
@@ -80,6 +153,16 @@ Troubleshooting
   ```bash
   docker logs -n 200 opensentry
   ```
+- Zeroconf/mDNS not working? Ensure the container can broadcast on the LAN. You can disable advertisement with `OPENSENTRY_MDNS_DISABLE=1`.
+
+Continuous Integration
+----------------------
+- GitHub Actions builds the Docker image and validates:
+  - `/health` is 200.
+  - `/status` responds correctly in two modes:
+    - without token
+    - with a dummy token provided by the workflow
+- Tests live in `tests/test_status.py`.
 
 License
 -------

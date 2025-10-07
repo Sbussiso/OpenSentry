@@ -11,9 +11,23 @@ def load_config(path: str) -> Dict[str, Any] | None:
         return None
 
 
-def save_config(path: str, object_detection: Dict[str, Any], motion_detection: Dict[str, Any], face_detection: Dict[str, Any]) -> None:
+def save_config(path: str, object_detection: Dict[str, Any], motion_detection: Dict[str, Any], face_detection: Dict[str, Any], device_id: str | None = None) -> None:
+    """Save config to JSON, preserving existing top-level keys like device_id.
+
+    - Ensures set -> list conversion for classes.
+    - If device_id is provided, it will be set; otherwise preserved when present.
+    """
+    # Start from existing to preserve keys like device_id
+    prev: Dict[str, Any] = {}
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            prev = json.load(f) or {}
+    except Exception:
+        prev = {}
+
     # Convert non-JSON types (e.g., set -> list)
     obj = {
+        **prev,
         'object_detection': {
             **object_detection,
             'classes': sorted(list(object_detection.get('classes', [])))
@@ -21,6 +35,9 @@ def save_config(path: str, object_detection: Dict[str, Any], motion_detection: D
         'motion_detection': {**motion_detection},
         'face_detection': {**face_detection},
     }
+    if device_id is not None:
+        obj['device_id'] = device_id
+
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(obj, f, indent=2)

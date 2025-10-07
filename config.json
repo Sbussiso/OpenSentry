@@ -21,5 +21,6 @@
     "embedding_threshold": 0.7,
     "manifest_embed_path": "/home/sbussiso/Projects/OpenSentry/archives/unknown_faces/manifest_embeddings.json",
     "cooldown_minutes": 0
-  }
+  },
+  "device_id": "a7077099be8a"
 }

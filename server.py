@@ -5,6 +5,7 @@ import os
 import logging
 import atexit
 import numpy as np
+import uuid
 try:
     import face_recognition  # type: ignore
 except Exception:
@@ -18,6 +19,7 @@ from helpers.settings_page import render_settings_page
 from helpers.index_page import render_index_page
 from helpers.all_feeds_page import render_all_feeds_page
 from helpers.theme import get_css, header_html
+from helpers.mdns import MdnsAdvertiser
 from helpers.face_dedup import (
     compute_phash as _compute_phash,
     hamming as _hamming,
@@ -35,6 +37,12 @@ from helpers.config import load_config as _load_config, save_config as _save_con
 
 app = Flask(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+APP_PORT = int(os.environ.get('OPENSENTRY_PORT', '5000'))
+APP_VERSION = os.environ.get('OPENSENTRY_VERSION', '0.1.0')
+DEVICE_NAME = os.environ.get('OPENSENTRY_DEVICE_NAME', 'OpenSentry')
+API_TOKEN = os.environ.get('OPENSENTRY_API_TOKEN', '').strip()
+MDNS_DISABLE = os.environ.get('OPENSENTRY_MDNS_DISABLE', '0') in ('1', 'true', 'TRUE')
+_mdns_adv = None
 
 # Logging configuration
 LOG_LEVEL = (os.environ.get('OPENSENTRY_LOG_LEVEL', 'INFO') or 'INFO').upper()
@@ -135,6 +143,43 @@ def favicon():
     # Intentionally empty to silence 404s from browsers
     return ('', 204)
 
+# Secure status endpoint for Command Center discovery/monitoring
+@app.route('/status')
+def status():
+    # Enforce bearer token if configured
+    if API_TOKEN:
+        auth = request.headers.get('Authorization', '')
+        if not auth.startswith('Bearer '):
+            return ({'error': 'unauthorized'}, 401)
+        token = auth[len('Bearer '):].strip()
+        if token != API_TOKEN:
+            return ({'error': 'forbidden'}, 403)
+    # Build status
+    has_frame = (camera_stream.get_frame() is not None)
+    raw_ok = camera_stream.running and has_frame
+    motion_ok = raw_ok
+    objects_ok = True  # advertised capability; heavy check avoided here
+    faces_ok = (get_face_cascade() is not None) and raw_ok
+    data = {
+        'id': DEVICE_ID,
+        'name': DEVICE_NAME,
+        'version': APP_VERSION,
+        'port': APP_PORT,
+        'caps': ['raw','motion','objects','faces'],
+        'routes': {
+            'raw': bool(raw_ok),
+            'motion': bool(motion_ok),
+            'objects': bool(objects_ok),
+            'faces': bool(faces_ok),
+        },
+        'camera': {
+            'running': bool(camera_stream.running),
+            'has_frame': bool(has_frame),
+        },
+        'auth_mode': 'token' if API_TOKEN else 'session',
+    }
+    return (data, 200)
+
 # Stream output tuning
 OUTPUT_MAX_WIDTH = 960
 JPEG_QUALITY = 75
@@ -184,6 +229,8 @@ CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
 
 # Load persisted config if present
 _cfg = _load_config(CONFIG_PATH)
+# Ensure a persistent short device_id
+DEVICE_ID = None
 if _cfg:
     try:
         with settings_lock:
@@ -196,6 +243,17 @@ if _cfg:
                 motion_detection_config.update(_cfg['motion_detection'])
             if 'face_detection' in _cfg:
                 face_detection_config.update(_cfg['face_detection'])
+            # read existing device_id if present
+            DEVICE_ID = _cfg.get('device_id') if isinstance(_cfg, dict) else None
+    except Exception:
+        DEVICE_ID = None
+
+if not DEVICE_ID:
+    # Generate short UUID and persist
+    DEVICE_ID = uuid.uuid4().hex[:12]
+    try:
+        with settings_lock:
+            _save_config(CONFIG_PATH, object_detection_config, motion_detection_config, face_detection_config, device_id=DEVICE_ID)
     except Exception:
         pass
 
@@ -209,6 +267,14 @@ def _on_shutdown():
             camera_stream.stop()
     except Exception:
         pass
+    # Stop mDNS advertiser if running
+    try:
+        global _mdns_adv
+        if _mdns_adv is not None:
+            _mdns_adv.stop()
+            _mdns_adv = None
+    except Exception:
+        pass
 
 atexit.register(_on_shutdown)
 
@@ -216,6 +282,35 @@ atexit.register(_on_shutdown)
 def _ensure_camera_started():
     if not camera_stream.running:
         camera_stream.start()
+
+# mDNS advertiser lifecycle
+def _start_mdns_advertiser():
+    global _mdns_adv
+    if MDNS_DISABLE:
+        return
+    try:
+        txt = {
+            'id': DEVICE_ID,
+            'name': DEVICE_NAME,
+            'ver': APP_VERSION,
+            'caps': 'raw,motion,objects,faces',
+            'auth': 'token' if API_TOKEN else 'session',
+            'api': '/status,/health',
+            'path': '/',
+            'proto': '1',
+        }
+        adv = MdnsAdvertiser(DEVICE_NAME, APP_PORT, txt)
+        adv.start()
+        _mdns_adv = adv
+        logger.info('mDNS advertised _opensentry._tcp.local for %s on port %d', DEVICE_NAME, APP_PORT)
+    except Exception as e:
+        logger.warning('mDNS advertise failed: %s', e)
+
+# Start advertiser on import
+try:
+    _start_mdns_advertiser()
+except Exception:
+    pass
 
 def generate_frames():
     """Generator function that yields raw frames in MJPEG format"""
