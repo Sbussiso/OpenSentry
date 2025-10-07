@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-healthcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image (Python 3.12)
+        run: |
+          docker build -t opensentry:ci .
+
+      - name: Run container
+        run: |
+          docker run -d --name opensentry -p 5000:5000 opensentry:ci
+
+      - name: Wait for /health
+        run: |
+          set -e
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:5000/health >/dev/null; then
+              echo "Health OK"; exit 0; fi
+            echo "Attempt $i: waiting for server..."
+            docker logs --tail 50 opensentry || true
+            sleep 3
+          done
+          echo "Health check failed"
+          docker logs opensentry || true
+          exit 1
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f opensentry || true
