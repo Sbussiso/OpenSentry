@@ -156,7 +156,7 @@ def _probe_oauth2(base_url: str) -> tuple[bool, dict | str]:
 def _auth_allowed() -> bool:
     # Allow unauthenticated access to only the login and OAuth2 routes
     ep = request.endpoint or ''
-    if ep in ('login', 'oauth2_login', 'oauth2_callback', 'oauth2_fallback', 'static', 'health', 'favicon', 'status'):
+    if ep in ('login', 'oauth2_login', 'oauth2_callback', 'oauth2_fallback', 'api_oauth2_test', 'static', 'health', 'favicon', 'status'):
         return True
     return bool(session.get('logged_in'))
 
@@ -330,7 +330,8 @@ def oauth2_callback():
     code_verifier_in_session = session.get('code_verifier')
 
     # Debug logging
-    cookie_present = bool(request.cookies.get(app.session_cookie_name))
+    cookie_name = app.config.get('SESSION_COOKIE_NAME', 'session')
+    cookie_present = bool(request.cookies.get(cookie_name))
     state_verified = _verify_state(state) if state else None
     logger.info(f"OAuth2 callback: got_state={(state or '')[:16]}..., expected={(expected or '')[:16]}..., cookie_present={cookie_present}, code_verifier_present={bool(code_verifier_in_session)}, state_verified={bool(state_verified)}")
 
@@ -391,12 +392,13 @@ def oauth2_callback():
         data['client_secret'] = cs
 
     # Debug logging
-    logger.info(f"Token exchange: url={token_url}, client_id={data.get('client_id')}, has_secret={bool(cs)}")
+    logger.info(f"Token exchange: url={token_url}, client_id={data.get('client_id')}, redirect_uri={redirect_uri}, code={code[:20]}..., verifier={code_verifier[:20]}..., has_secret={bool(cs)}")
 
     try:
         r = requests.post(token_url, data=data, timeout=5)
         if r.status_code != 200:
             logger.error(f"Token exchange failed: {r.status_code}, response={r.text[:200]}")
+            logger.error(f"Request data sent: {data}")
             return (f"Token exchange failed: {r.status_code}", 502)
         tok = r.json()
     except Exception as e:
@@ -1385,14 +1387,18 @@ def settings():
 
         # Handle OAuth2 authentication settings
         if action == 'update_auth':
+            logger.info(f"Received update_auth request")
             auth_mode_in = (request.form.get('auth_mode') or '').strip().lower()
             oauth2_base_url_in = (request.form.get('oauth2_base_url') or '').strip()
             oauth2_client_id_in = (request.form.get('oauth2_client_id') or '').strip()
             oauth2_client_secret_in = (request.form.get('oauth2_client_secret') or '').strip()
             oauth2_scope_in = (request.form.get('oauth2_scope') or 'openid profile email offline_access').strip()
 
+            logger.info(f"Auth mode: {auth_mode_in}, Base URL: {oauth2_base_url_in}, Client ID: {oauth2_client_id_in}")
+
             if auth_mode_in not in ('local', 'oauth2'):
                 # Invalid mode; ignore
+                logger.warning(f"Invalid auth_mode: {auth_mode_in}")
                 return redirect(url_for('settings'))
 
             # If selecting oauth2, validate base_url via well-known fetch
@@ -1421,9 +1427,13 @@ def settings():
 
                 # Persist config to disk
                 try:
+                    logger.info(f"Saving auth config to disk: {auth_config}")
                     _save_config(CONFIG_PATH, object_detection_config, motion_detection_config, face_detection_config, auth_config=auth_config)
+                    logger.info("Auth config saved successfully")
                 except Exception as e:
                     logger.error(f"Failed to save auth config: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
 
             return redirect(url_for('settings'))
 

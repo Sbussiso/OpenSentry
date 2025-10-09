@@ -22,5 +22,12 @@
     "manifest_embed_path": "/home/sbussiso/Projects/OpenSentry/archives/unknown_faces/manifest_embeddings.json",
     "cooldown_minutes": 0
   },
-  "device_id": "a7077099be8a"
+  "device_id": "a7077099be8a",
+  "auth": {
+    "auth_mode": "oauth2",
+    "oauth2_base_url": "http://127.0.0.1:8000",
+    "oauth2_client_id": "opensentry-device",
+    "oauth2_client_secret": "",
+    "oauth2_scope": "openid profile email offline_access"
+  }
 }

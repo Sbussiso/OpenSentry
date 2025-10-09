@@ -809,6 +809,7 @@ dependencies = [
     { name = "gevent" },
     { name = "gunicorn" },
     { name = "opencv-python" },
+    { name = "requests" },
     { name = "ultralytics" },
     { name = "zeroconf" },
 ]
@@ -820,6 +821,7 @@ requires-dist = [
     { name = "gevent", specifier = ">=24.2.1" },
     { name = "gunicorn", specifier = ">=22.0.0" },
     { name = "opencv-python", specifier = ">=4.12.0.88" },
+    { name = "requests", specifier = ">=2.31.0" },
     { name = "ultralytics", specifier = ">=8.3.204" },
     { name = "zeroconf", specifier = ">=0.148.0" },
 ]
