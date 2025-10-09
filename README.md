@@ -1,120 +1,239 @@
-OpenSentry
-===========
+# OpenSentry
 
-Turn any Linux device with a camera into a local security system you can view from your browser.
+**Turn any Linux device with a camera into a smart security system you control.**
 
-Features
---------
-- Dark-themed UI with header and quick navigation
-- Live streams: Raw, Motion, YOLO Objects, Faces (Haar)
-- Settings page to tune motion/face behavior and manage unknown faces
-- Archives of unknown faces with promote/delete actions
-- Health endpoint and simple session auth
-- **OAuth2 Authentication** – Optional integration with external OAuth2/OIDC providers
+Self-hosted. Privacy-first. No cloud required.
 
-Requirements
-------------
-- Python 3.12+
-- Linux with a V4L2 camera (e.g., /dev/video0)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
 
-Quickstart (host)
------------------
-1) Create env and run:
+---
+
+## 🎯 What is OpenSentry?
+
+OpenSentry transforms any Linux device with a webcam into an intelligent security camera system. Stream live video, detect motion, identify objects with YOLO, and recognize faces—all processed locally on your hardware.
+
+### Key Features
+
+- 📹 **Live Video Streaming** - Multiple feed types (raw, motion, objects, faces)
+- 🚶 **Motion Detection** - Configurable sensitivity and detection zones
+- 🎯 **Object Detection** - YOLO-powered real-time object recognition
+- 👤 **Face Detection** - Archive unknown faces for later identification
+- 🌐 **Web Interface** - Dark-themed, mobile-friendly dashboard
+- 🔐 **Flexible Authentication** - Local auth or integrate with OAuth2/OIDC providers
+- 🔍 **mDNS Discovery** - Auto-discover devices on your network
+- 🐳 **Docker Ready** - Deploy anywhere with Docker Compose
+
+---
+
+## 📖 Table of Contents
+
+- [Quick Start](#-quick-start)
+- [Installation](#-installation)
+  - [Run from Source](#run-from-source)
+  - [Docker Deployment](#docker-deployment)
+- [Authentication](#-authentication)
+  - [Local Authentication](#local-authentication-default)
+  - [OAuth2 Integration](#oauth2-integration)
+- [Configuration](#%EF%B8%8F-configuration)
+- [API & Endpoints](#-api--endpoints)
+- [OAuth2 Setup Guide](#-oauth2-setup-guide)
+- [Discovery & mDNS](#-discovery--mdns)
+- [Troubleshooting](#-troubleshooting)
+- [Related Projects](#-related-projects)
+
+---
+
+## 🚀 Quick Start
+
+### Option 1: Run from Source
 ```bash
+# Clone the repository
+git clone https://github.com/yourusername/OpenSentry.git
+cd OpenSentry
+
+# Start the server
 uv run server.py
-# Visit http://127.0.0.1:5000
+
+# Access at http://127.0.0.1:5000
+# Default credentials: admin / admin
 ```
 
-2) Default login
-- Username: admin
-- Password: admin
-Set env vars below for production.
-
-Quickstart (Docker Compose)
----------------------------
+### Option 2: Docker Compose
 ```bash
+# Start with Docker Compose
 docker compose up -d
-# Visit http://127.0.0.1:5000
+
+# Access at http://127.0.0.1:5000
 ```
 
-The compose file publishes port 5000, maps archives to /app/archives, and (optionally) maps /dev/video0. Ensure you are using the system Docker engine (not Docker Desktop VM) to access host devices.
+That's it! OpenSentry is now streaming from your camera.
 
-Example `compose.yaml`:
+---
+
+## 📦 Installation
+
+### Requirements
+
+- Python 3.12+ (for source installation)
+- Linux with V4L2 camera support (e.g., `/dev/video0`)
+- 1GB RAM minimum (2GB+ recommended)
+- Docker (optional, for containerized deployment)
+
+### Run from Source
+
+```bash
+# Install dependencies with uv (recommended)
+uv sync
+
+# Or use pip
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Start the server
+uv run server.py
+```
+
+Visit **http://127.0.0.1:5000** and log in with `admin/admin`.
+
+### Docker Deployment
+
+#### Basic Docker Compose
 
 ```yaml
 services:
   opensentry:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: opensentry:pi
+    image: opensentry:latest
+    container_name: opensentry
+    ports:
+      - "5000:5000"
+    environment:
+      - OPENSENTRY_USER=admin
+      - OPENSENTRY_PASS=admin
+      - OPENSENTRY_SECRET=please-change-me-in-production
+      - OPENSENTRY_PORT=5000
+    devices:
+      - /dev/video0:/dev/video0
+    group_add:
+      - video
+    volumes:
+      - ./archives:/app/archives
+      - ./config.json:/app/config.json
+    restart: unless-stopped
+```
+
+```bash
+# Build and start
+docker compose up -d --build
+
+# View logs
+docker logs -f opensentry
+```
+
+#### Production Docker Compose
+
+For production deployments with OAuth2:
+
+```yaml
+services:
+  opensentry:
+    build: .
     container_name: opensentry
     ports:
       - "${OPENSENTRY_PORT:-5000}:${OPENSENTRY_PORT:-5000}"
     environment:
       - OPENSENTRY_USER=admin
-      - OPENSENTRY_PASS=admin
-      - OPENSENTRY_SECRET=please-change-me
-      - OPENSENTRY_LOG_LEVEL=INFO
+      - OPENSENTRY_PASS=${OPENSENTRY_PASS}
+      - OPENSENTRY_SECRET=${OPENSENTRY_SECRET}
       - OPENSENTRY_PORT=${OPENSENTRY_PORT:-5000}
-      # Optional discovery metadata and protection for /status
-      # - OPENSENTRY_DEVICE_NAME=Garage Cam
-      # - OPENSENTRY_API_TOKEN=your-ci-or-command-token
-      # - OPENSENTRY_MDNS_DISABLE=0
-    volumes:
-      - ./archives:/app/archives
+      - OPENSENTRY_DEVICE_NAME=Front Door Camera
+      - OPENSENTRY_API_TOKEN=${API_TOKEN}
+      - OPENSENTRY_LOG_LEVEL=INFO
     devices:
       - /dev/video0:/dev/video0
     group_add:
       - video
+    volumes:
+      - opensentry_archives:/app/archives
+      - opensentry_config:/app
     restart: unless-stopped
+
+volumes:
+  opensentry_archives:
+  opensentry_config:
 ```
 
-Environment variables
----------------------
-- OPENSENTRY_USER=admin
-- OPENSENTRY_PASS=admin
-- OPENSENTRY_SECRET=please-change-me
-- OPENSENTRY_LOG_LEVEL=INFO  (INFO, DEBUG)
-- OPENSENTRY_CAMERA_INDEX=0  (preferred index; auto-probes 0..5)
-- OPENSENTRY_PORT=5000       (preferred HTTP port; app will fall back to the next free port if busy)
-- OPENSENTRY_DEVICE_NAME=OpenSentry  (shown in header and mDNS TXT)
-- OPENSENTRY_API_TOKEN=      (if set, `/status` requires Authorization: Bearer <token>)
-- OPENSENTRY_MDNS_DISABLE=0  (set to 1 to disable mDNS advertisement)
-- OPENSENTRY_VERSION=0.1.0   (metadata only for discovery)
+Create a `.env` file:
+```bash
+OPENSENTRY_PASS=secure-password-here
+OPENSENTRY_SECRET=your-64-char-random-secret
+OPENSENTRY_PORT=5000
+API_TOKEN=your-api-token-for-status-endpoint
+```
 
-Config and archives
--------------------
-- `config.json` persists motion/object/face settings and a generated `device_id`.
-- `archives/` stores snapshots of unknown faces and manifests.
-- Both are ignored by Git (see `.gitignore`).
+---
 
-Authentication
---------------
-OpenSentry supports two authentication modes:
+## 🔐 Authentication
+
+OpenSentry supports two authentication modes: **Local** (simple username/password) and **OAuth2** (enterprise SSO integration).
 
 ### Local Authentication (Default)
-- Simple username/password authentication
-- Configure via environment variables:
-  - `OPENSENTRY_USER=admin` (default: admin)
-  - `OPENSENTRY_PASS=admin` (default: admin)
-  - `OPENSENTRY_SECRET=please-change-me` (session encryption key)
 
-### OAuth2 Authentication
-- Integrate with external OAuth2/OIDC providers (e.g., custom OAuth2 server, Keycloak, Auth0, etc.)
-- Configure via the Settings page (`/settings`):
-  1. Select "OAuth2 Authentication" option
-  2. Enter OAuth2 Server Base URL (e.g., `http://127.0.0.1:8000`)
-  3. Enter Client ID (e.g., `opensentry-device`)
-  4. Optional: Enter Client Secret (for confidential clients)
-  5. Configure Scope (default: `openid profile email offline_access`)
-  6. Click "Test OAuth2 Connection" to verify
-  7. Click "Save Authentication Settings"
-- Settings are persisted in `config.json` under the `auth` key
-- OAuth2 flow uses Authorization Code + PKCE for security
-- Local login fallback is available via `/oauth2/fallback` if OAuth2 server is unavailable
+Simple username/password authentication for quick setups.
 
-**Example OAuth2 Configuration:**
+**Configuration:**
+```bash
+# Environment variables
+export OPENSENTRY_USER=admin
+export OPENSENTRY_PASS=admin
+export OPENSENTRY_SECRET=please-change-me
+```
+
+**Docker:**
+```yaml
+environment:
+  - OPENSENTRY_USER=admin
+  - OPENSENTRY_PASS=secure-password
+  - OPENSENTRY_SECRET=random-64-char-secret
+```
+
+### OAuth2 Integration
+
+Integrate with external OAuth2/OIDC providers for centralized authentication, SSO, and enterprise identity management.
+
+**Supported Providers:**
+- ✅ Custom OAuth2 Server ([see our OAuth2 project](#-related-projects))
+- ✅ Keycloak
+- ✅ Auth0
+- ✅ Okta
+- ✅ Google OAuth2
+- ✅ Any OIDC-compliant provider
+
+**Benefits:**
+- 🏢 **Single Sign-On (SSO)** - One login for all your services
+- 🔒 **Centralized Auth** - Manage users in one place
+- 📊 **Audit Logging** - Track authentication events
+- 🔑 **Advanced Security** - MFA, conditional access, etc.
+- 🌐 **Multi-Device** - Consistent auth across all OpenSentry instances
+
+**Configuration via Web UI:**
+
+1. Navigate to **Settings** → **Authentication**
+2. Select **"OAuth2 Authentication"**
+3. Enter your OAuth2 server details:
+   - **Base URL**: `http://your-oauth-server:8000`
+   - **Client ID**: `opensentry-device`
+   - **Client Secret**: (optional, for confidential clients)
+   - **Scope**: `openid profile email offline_access`
+4. Click **"Test OAuth2 Connection"** to verify
+5. Click **"Save Authentication Settings"**
+6. Restart OpenSentry
+
+**Configuration via JSON:**
+
+Edit `config.json`:
 ```json
 {
   "auth": {
@@ -127,185 +246,612 @@ OpenSentry supports two authentication modes:
 }
 ```
 
-Security notes
---------------
-- Change OPENSENTRY_USER/OPENSENTRY_PASS/OPENSENTRY_SECRET in production.
-- Use strong secrets and consider HTTPS termination in front of the app.
-- Health endpoint at `/health` is unauthenticated for probes.
-- When using OAuth2, ensure the OAuth2 server is properly secured and accessible.
+**Fallback to Local Login:**
 
-Camera selection
-----------------
-- The app reads `OPENSENTRY_CAMERA_INDEX` (default 0) and auto-probes indices 0..5 until a working device is found.
-- In Docker, map the device node(s) into the container, e.g. `/dev/video0:/dev/video0` and add `group_add: [video]`.
-  - Avoid `privileged: true` unless needed. Use it only as a last resort.
+If the OAuth2 server is unavailable, users can access local login via:
+```
+http://your-opensentry:5000/oauth2/fallback
+```
 
-Endpoints
----------
-### Main Routes
-- `/` – Index
-- `/all_feeds` – 2x2 grid of streams
-- `/video_feed`, `/video_feed_motion`, `/video_feed_objects`, `/video_feed_faces`
-- `/settings` – Motion/face/authentication settings and unknowns management
-- `/archives/unknown_faces` – Review and promote/delete unknown faces
-- `/health` – Health check (200 OK)
+Or click **"Use local login for now"** on the OAuth2 unavailable page.
 
-### Authentication Routes
-- `/login` – Local login (or redirects to OAuth2 if configured)
-- `/logout` – Clear session and logout
-- `/oauth2/login` – Initiate OAuth2 authorization flow
-- `/oauth2/callback` – OAuth2 callback handler
-- `/oauth2/fallback` – Enable local login fallback when OAuth2 is configured
+---
 
-### API Routes
-- `/api/oauth2/test` – Test OAuth2 server connectivity (query param: `base_url`)
+## ⚙️ Configuration
 
-Discovery (mDNS + /status)
----------------------------
-- mDNS service: `_opensentry._tcp.local` via Zeroconf.
-- TXT keys (no secrets):
-  - `id` (short persistent device id)
-  - `name` (device display name)
-  - `ver` (app version)
-  - `caps` (raw,motion,objects,faces)
-  - `auth` (token|session)
-  - `api` (`/status,/health`)
-  - `path` (`/`)
-  - `proto` (`1`)
+### Environment Variables
 
-`/status` JSON:
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `OPENSENTRY_USER` | Local auth username | `admin` |
+| `OPENSENTRY_PASS` | Local auth password | `admin` |
+| `OPENSENTRY_SECRET` | Session encryption key (use random 64-char string) | Random (dev only) |
+| `OPENSENTRY_PORT` | HTTP port (auto-increments if busy) | `5000` |
+| `OPENSENTRY_CAMERA_INDEX` | Preferred camera index | `0` |
+| `OPENSENTRY_DEVICE_NAME` | Device display name | `OpenSentry` |
+| `OPENSENTRY_LOG_LEVEL` | Logging verbosity (`INFO`, `DEBUG`) | `INFO` |
+| `OPENSENTRY_API_TOKEN` | Bearer token for `/status` endpoint | _(none)_ |
+| `OPENSENTRY_MDNS_DISABLE` | Disable mDNS advertisement | `0` |
+| `OPENSENTRY_VERSION` | Version metadata for discovery | `0.1.0` |
+
+### config.json Structure
+
 ```json
 {
-  "id": "abc123def456",
-  "name": "OpenSentry",
-  "version": "0.1.0",
-  "port": 5000,
-  "caps": ["raw","motion","objects","faces"],
-  "routes": {"raw": true, "motion": true, "objects": true, "faces": true},
-  "camera": {"running": true, "has_frame": true},
-  "auth_mode": "token" | "session"
+  "device_id": "a7077099be8a",
+  "object_detection": {
+    "select_all": true,
+    "classes": []
+  },
+  "motion_detection": {
+    "threshold": 25,
+    "min_area": 500,
+    "kernel": 15,
+    "iterations": 2,
+    "pad": 10
+  },
+  "face_detection": {
+    "archive_unknown": true,
+    "min_duration_sec": 15,
+    "archive_dir": "./archives/unknown_faces",
+    "dedup_enabled": false,
+    "dedup_threshold": 10,
+    "cooldown_minutes": 0
+  },
+  "auth": {
+    "auth_mode": "local",
+    "oauth2_base_url": "",
+    "oauth2_client_id": "",
+    "oauth2_client_secret": "",
+    "oauth2_scope": "openid profile email offline_access"
+  }
 }
 ```
 
-If `OPENSENTRY_API_TOKEN` is set, call with a bearer token:
-```bash
-curl -H "Authorization: Bearer $OPENSENTRY_API_TOKEN" http://<ip>:5000/status
+### Archives
+
+- **Location**: `./archives/unknown_faces/`
+- **Contains**: Unknown face snapshots and manifest
+- **Management**: View and promote/delete via `/archives/unknown_faces`
+
+---
+
+## 🌐 API & Endpoints
+
+### Main Routes
+
+| Endpoint | Description | Auth Required |
+|----------|-------------|---------------|
+| `/` | Dashboard | ✅ |
+| `/all_feeds` | 2x2 grid of all video streams | ✅ |
+| `/video_feed` | Raw camera feed (MJPEG) | ✅ |
+| `/video_feed_motion` | Motion detection overlay | ✅ |
+| `/video_feed_objects` | YOLO object detection | ✅ |
+| `/video_feed_faces` | Face detection overlay | ✅ |
+| `/settings` | Configuration page | ✅ |
+| `/archives/unknown_faces` | Face archive management | ✅ |
+| `/health` | Health check (200 OK) | ❌ |
+
+### Authentication Routes
+
+| Endpoint | Description |
+|----------|-------------|
+| `/login` | Local login page |
+| `/logout` | Clear session and logout |
+| `/oauth2/login` | Initiate OAuth2 authorization flow |
+| `/oauth2/callback` | OAuth2 callback handler |
+| `/oauth2/fallback` | Enable local login fallback |
+
+### API Routes
+
+| Endpoint | Method | Description | Auth |
+|----------|--------|-------------|------|
+| `/status` | GET | Device status JSON | Bearer token (if configured) |
+| `/api/oauth2/test` | GET | Test OAuth2 connectivity | ✅ |
+
+**Example `/status` Response:**
+```json
+{
+  "id": "a7077099be8a",
+  "name": "OpenSentry",
+  "version": "0.1.0",
+  "port": 5000,
+  "caps": ["raw", "motion", "objects", "faces"],
+  "routes": {
+    "raw": true,
+    "motion": true,
+    "objects": true,
+    "faces": true
+  },
+  "camera": {
+    "running": true,
+    "has_frame": true
+  },
+  "auth_mode": "oauth2"
+}
 ```
 
-OAuth2 Integration Example
----------------------------
-OpenSentry can integrate with the custom OAuth2 server from the sibling `Oauth2` project or any OIDC-compliant provider.
+---
 
-### Using the Custom OAuth2 Server
-1. Start the OAuth2 server:
-   ```bash
-   cd ../Oauth2
-   uv run server.py
-   # Server runs at http://127.0.0.1:8000
+## 🔧 OAuth2 Setup Guide
+
+### Prerequisites
+
+1. **OAuth2 Server Running** - See [our OAuth2 project](https://github.com/Sbussiso/LOauth2) or use your existing provider
+2. **Client Registration** - Register OpenSentry as an OAuth2 client
+
+### Step-by-Step Setup
+
+#### 1. Register OpenSentry as OAuth2 Client
+
+For our custom OAuth2 server, use the included registration script:
+
+```bash
+# Navigate to OAuth2 server directory
+cd ../Oauth2
+
+# Create and run the client registration script
+cat > add_opensentry_client.py << 'EOF'
+#!/usr/bin/env python3
+import os
+import sys
+os.environ['DATABASE_URL'] = os.environ.get('DATABASE_URL', 'sqlite:///oauth.db')
+
+from server import SessionLocal, OAuth2Client
+
+db = SessionLocal()
+existing = db.query(OAuth2Client).filter_by(client_id='opensentry-device').first()
+
+# Space-separated redirect URIs
+redirect_uris = 'http://localhost:5000/oauth2/callback http://127.0.0.1:5000/oauth2/callback'
+scope = 'openid profile email offline_access'
+
+if existing:
+    print("Updating existing client...")
+    existing.client_secret = None
+    existing.client_name = 'OpenSentry Device'
+    existing.redirect_uris = redirect_uris
+    existing.scope = scope
+    existing.grant_types = 'authorization_code refresh_token'
+    existing.response_types = 'code'
+    existing.token_endpoint_auth_method = 'none'
+    existing.require_consent = True
+    db.commit()
+    print("✓ Client 'opensentry-device' updated")
+else:
+    print("Creating new client...")
+    client = OAuth2Client(
+        client_id='opensentry-device',
+        client_secret=None,
+        client_name='OpenSentry Device',
+        redirect_uris=redirect_uris,
+        scope=scope,
+        grant_types='authorization_code refresh_token',
+        response_types='code',
+        token_endpoint_auth_method='none',
+        require_consent=True
+    )
+    db.add(client)
+    db.commit()
+    print("✓ Client 'opensentry-device' created")
+
+db.close()
+EOF
+
+# Run the registration script
+uv run python add_opensentry_client.py
+```
+
+**Important Configuration Details:**
+- **Client Type**: Public (no client secret)
+- **Auth Method**: `none` (PKCE required)
+- **Redirect URIs**: Must include both `localhost` and `127.0.0.1` variants
+- **Grant Types**: `authorization_code`, `refresh_token`
+- **Scopes**: `openid profile email offline_access`
+
+#### 2. Configure OpenSentry
+
+**Via Web UI:**
+1. Start OpenSentry: `uv run server.py`
+2. Navigate to `/settings`
+3. Scroll to **Authentication Settings**
+4. Select **OAuth2 Authentication**
+5. Enter configuration:
    ```
-
-2. Register OpenSentry as a client in the OAuth2 server's `config.json`:
-   ```json
-   {
-     "clients": {
-       "opensentry-device": {
-         "client_secret": null,
-         "redirect_uris": ["http://localhost:5000/oauth2/callback"],
-         "scopes": ["openid", "profile", "email"],
-         "is_confidential": false
-       }
-     }
-   }
+   OAuth2 Server Base URL: http://127.0.0.1:8000
+   Client ID: opensentry-device
+   Client Secret: (leave empty)
+   Scope: openid profile email offline_access
    ```
+6. Click **Test OAuth2 Connection** (should show "Success!")
+7. Click **Save Authentication Settings**
+8. Restart OpenSentry
 
-3. Configure OpenSentry via `/settings`:
-   - Auth Mode: OAuth2 Authentication
-   - OAuth2 Server Base URL: `http://127.0.0.1:8000`
-   - Client ID: `opensentry-device`
-   - Client Secret: (leave empty for public client)
-   - Scope: `openid profile email offline_access`
+**Via Configuration File:**
 
-4. Test the connection and save settings
-5. You'll be redirected to the OAuth2 server for login
-6. After successful authentication, you'll be redirected back to OpenSentry
-
-### Multiple Device Instances with OAuth2
-When running multiple OpenSentry instances with OAuth2:
-- Each instance needs its own client ID registered in the OAuth2 server
-- Update `redirect_uris` to match each instance's port:
-  ```json
-  {
-    "clients": {
-      "opensentry-garage": {
-        "redirect_uris": ["http://localhost:5000/oauth2/callback"]
-      },
-      "opensentry-front": {
-        "redirect_uris": ["http://localhost:5001/oauth2/callback"]
-      }
-    }
+Edit `config.json`:
+```json
+{
+  "auth": {
+    "auth_mode": "oauth2",
+    "oauth2_base_url": "http://127.0.0.1:8000",
+    "oauth2_client_id": "opensentry-device",
+    "oauth2_client_secret": "",
+    "oauth2_scope": "openid profile email offline_access"
   }
-  ```
+}
+```
 
-Port selection and multiple instances
--------------------------------------
-- The server binds to `OPENSENTRY_PORT` (default `5000`). If that port is busy, it tries `+1` up to 10 attempts (e.g., 5001, 5002...).
-- `/status` and the mDNS advertisement include the actual bound `port`.
-- Docker Compose: the example maps host and container ports using the same `OPENSENTRY_PORT` value so discovery matches host reachability.
-- To run multiple instances on one host (Compose):
-  ```bash
-  OPENSENTRY_PORT=5000 docker compose -p opensentry5000 up -d --build
-  OPENSENTRY_PORT=5001 docker compose -p opensentry5001 up -d --build
-  ```
-  Then visit `http://<host>:5000` and `http://<host>:5001` respectively.
+Restart OpenSentry.
 
-Troubleshooting
----------------
+#### 3. Test the Integration
+
+1. Navigate to `http://127.0.0.1:5000`
+2. You'll be redirected to the OAuth2 server login
+3. Log in with your OAuth2 credentials
+4. Approve the consent screen
+5. You'll be redirected back to OpenSentry and logged in
+
+**If OAuth2 server is down:**
+- You'll see an "OAuth2 Unavailable" page
+- Click "Use local login for now" to use basic auth
+- Or visit `http://127.0.0.1:5000/oauth2/fallback`
+
+### Multiple OpenSentry Instances
+
+When running multiple OpenSentry devices with OAuth2:
+
+**Option 1: One Client, Multiple Redirect URIs**
+```python
+redirect_uris = 'http://localhost:5000/oauth2/callback http://localhost:5001/oauth2/callback http://localhost:5002/oauth2/callback'
+```
+
+**Option 2: Separate Clients Per Device** (Recommended)
+```bash
+# Register each device separately
+opensentry-garage    → http://192.168.1.10:5000/oauth2/callback
+opensentry-front     → http://192.168.1.11:5000/oauth2/callback
+opensentry-backyard  → http://192.168.1.12:5000/oauth2/callback
+```
+
+Update each OpenSentry's `config.json` with its unique `oauth2_client_id`.
+
+---
+
+## 🔍 Discovery & mDNS
+
+OpenSentry advertises itself on the local network using mDNS (Zeroconf).
+
+### mDNS Service
+
+- **Service Type**: `_opensentry._tcp.local`
+- **Port**: Actual bound port (may differ from `OPENSENTRY_PORT` if port was busy)
+
+### TXT Records
+
+| Key | Description | Example |
+|-----|-------------|---------|
+| `id` | Persistent device ID | `a7077099be8a` |
+| `name` | Device display name | `Front Door Camera` |
+| `ver` | OpenSentry version | `0.1.0` |
+| `caps` | Capabilities | `raw,motion,objects,faces` |
+| `auth` | Auth mode | `session` or `token` |
+| `api` | Available APIs | `/status,/health` |
+| `path` | Web UI path | `/` |
+| `proto` | Protocol version | `1` |
+
+### Discovery Tools
+
+Use the companion **OpenSentry Command** project to discover all devices on your network:
+
+```bash
+# Clone OpenSentry Command
+git clone https://github.com/yourusername/OpenSentry-Command.git
+cd OpenSentry-Command
+
+# Run discovery
+uv run main.py
+
+# Access at http://127.0.0.1:3000
+```
+
+See [Related Projects](#-related-projects) for more info.
+
+---
+
+## 🔧 Troubleshooting
 
 ### Camera Issues
-- Can't access camera in Docker? Ensure you're talking to the system engine and the device exists inside the container.
-  - Check context: `docker context show` → should be `default`
-  - If needed, force the system socket: `DOCKER_HOST=unix:///var/run/docker.sock`
-  - Test mapping directly:
-    ```bash
-    docker run --rm -it --device /dev/video0:/dev/video0 ubuntu:22.04 ls -l /dev/video0
-    ```
-- Streams blank? Check logs and set `OPENSENTRY_LOG_LEVEL=DEBUG`.
-  ```bash
-  docker logs -n 200 opensentry
-  ```
 
-### Network Issues
-- Zeroconf/mDNS not working? Ensure the container can broadcast on the LAN. You can disable advertisement with `OPENSENTRY_MDNS_DISABLE=1`.
+**Problem**: Camera not detected or streams are blank
+
+**Solutions:**
+1. Check camera device exists:
+   ```bash
+   ls -l /dev/video*
+   ```
+
+2. Test camera with v4l2:
+   ```bash
+   sudo apt install v4l-utils
+   v4l2-ctl --list-devices
+   v4l2-ctl -d /dev/video0 --list-formats-ext
+   ```
+
+3. Docker: Ensure device mapping and group permissions:
+   ```yaml
+   devices:
+     - /dev/video0:/dev/video0
+   group_add:
+     - video
+   ```
+
+4. Check logs:
+   ```bash
+   # Host
+   uv run server.py  # Watch startup logs
+
+   # Docker
+   docker logs -f opensentry
+   ```
+
+5. Try different camera index:
+   ```bash
+   export OPENSENTRY_CAMERA_INDEX=1
+   uv run server.py
+   ```
 
 ### OAuth2 Issues
-- **"OAuth2 Server Unavailable"**: Verify the OAuth2 server is running and accessible from OpenSentry:
-  ```bash
-  curl http://127.0.0.1:8000/.well-known/openid-configuration
-  ```
-- **"Invalid OAuth2 callback"**: Ensure the redirect URI in OAuth2 server config matches OpenSentry's callback URL:
-  - Format: `http://<host>:<port>/oauth2/callback`
-  - Example: `http://localhost:5000/oauth2/callback`
-- **"Token exchange failed"**: Check OAuth2 server logs for details. Common causes:
-  - Client ID mismatch
-  - Invalid client secret (if using confidential client)
-  - Redirect URI mismatch
-  - PKCE verification failure
-- **Locked out after switching to OAuth2**: Use the fallback URL to login with local credentials:
-  ```
-  http://localhost:5000/oauth2/fallback
-  ```
-- **Session lost during OAuth2 flow**: Ensure `OPENSENTRY_SECRET` is set and consistent across restarts. The secret is used to sign state tokens.
 
-Continuous Integration
-----------------------
-- GitHub Actions builds the Docker image and validates:
-  - `/health` is 200.
-  - `/status` responds correctly in two modes:
-    - without token
-    - with a dummy token provided by the workflow
-- Tests live in `tests/test_status.py`.
+**Problem**: "OAuth2 Server Unavailable"
 
-License
--------
-MIT
+**Solutions:**
+1. Verify OAuth2 server is running:
+   ```bash
+   curl http://127.0.0.1:8000/.well-known/openid-configuration
+   ```
 
+2. Check network connectivity from OpenSentry to OAuth2 server
+
+3. Review OAuth2 server logs for errors
+
+4. Use fallback: `http://127.0.0.1:5000/oauth2/fallback`
+
+**Problem**: "Invalid OAuth2 callback" or redirect errors
+
+**Solutions:**
+1. Verify redirect URI matches exactly:
+   ```bash
+   # In OAuth2 client config
+   redirect_uris = 'http://localhost:5000/oauth2/callback'
+
+   # Must match OpenSentry's callback URL
+   # Format: http://<host>:<port>/oauth2/callback
+   ```
+
+2. Include both `localhost` and `127.0.0.1` variants:
+   ```bash
+   redirect_uris = 'http://localhost:5000/oauth2/callback http://127.0.0.1:5000/oauth2/callback'
+   ```
+
+3. For remote access, add your OpenSentry's IP:
+   ```bash
+   redirect_uris = 'http://192.168.1.10:5000/oauth2/callback'
+   ```
+
+**Problem**: "Token exchange failed" (401 error)
+
+**Solutions:**
+1. Verify client is registered correctly:
+   ```bash
+   # Check client configuration
+   uv run python -c "from server import SessionLocal, OAuth2Client; \
+     db = SessionLocal(); \
+     c = db.query(OAuth2Client).filter_by(client_id='opensentry-device').first(); \
+     print('Auth method:', c.token_endpoint_auth_method); \
+     print('Client secret:', c.client_secret); \
+     print('Redirect URIs:', c.redirect_uris)"
+   ```
+
+2. Ensure `token_endpoint_auth_method = 'none'` for public clients
+
+3. Verify redirect_uris are stored as **space-separated string**, not JSON array
+
+4. Check OAuth2 server logs for detailed error messages
+
+**Problem**: Session lost during OAuth2 flow
+
+**Solutions:**
+1. Ensure `OPENSENTRY_SECRET` is set and consistent:
+   ```bash
+   export OPENSENTRY_SECRET="your-64-character-random-secret"
+   ```
+
+2. Use Docker volumes to persist sessions:
+   ```yaml
+   volumes:
+     - opensentry_config:/app
+   ```
+
+3. Check browser cookie settings (ensure cookies enabled)
+
+### Network Issues
+
+**Problem**: mDNS/Zeroconf not working
+
+**Solutions:**
+1. Check if Avahi/Bonjour is running:
+   ```bash
+   sudo systemctl status avahi-daemon
+   ```
+
+2. Disable mDNS if not needed:
+   ```bash
+   export OPENSENTRY_MDNS_DISABLE=1
+   ```
+
+3. Docker: Ensure container can broadcast on LAN (use `network_mode: host` or proper bridge config)
+
+### Port Conflicts
+
+**Problem**: Port 5000 already in use
+
+**Solution**: OpenSentry auto-increments to next available port (5001, 5002, etc.)
+
+To force a specific port:
+```bash
+export OPENSENTRY_PORT=5010
+uv run server.py
+```
+
+Check actual bound port in logs:
+```
+[INFO] opensentry: Binding HTTP server on port 5010
+```
+
+### Performance Issues
+
+**Problem**: High CPU usage or slow streams
+
+**Solutions:**
+1. Reduce camera resolution in `server.py` (line ~640):
+   ```python
+   cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+   cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+   ```
+
+2. Disable unused detection features via `/settings`
+
+3. Increase Docker resource limits:
+   ```yaml
+   deploy:
+     resources:
+       limits:
+         cpus: '2.0'
+         memory: 2G
+   ```
+
+4. Use hardware acceleration if available (Raspberry Pi: enable V4L2 hardware encoding)
+
+---
+
+## 🔗 Related Projects
+
+### OpenSentry Command
+**Device Discovery & Management Dashboard**
+
+Central dashboard to discover, monitor, and manage all OpenSentry devices on your network.
+
+- 🔍 Auto-discover devices via mDNS
+- 📊 Network scanning and device status
+- 🌐 Unified access to all cameras
+- 🔐 OAuth2 integration for SSO
+
+[View Project →](https://github.com/yourusername/OpenSentry-Command)
+
+### LOauth2 (OAuth2 Server)
+**Self-Hosted OAuth2 / OIDC Authorization Server**
+
+Complete OAuth2/OIDC server for centralized authentication across all your services.
+
+- 🔒 Enterprise-grade security (PKCE, refresh tokens, RS256)
+- 🎛️ Admin UI for client management
+- 🌐 Standards-compliant (OAuth 2.0, OIDC)
+- 🚀 Production-ready
+
+[View Project →](https://github.com/Sbussiso/LOauth2)
+
+**Quick Setup with OpenSentry:**
+```bash
+# 1. Start OAuth2 server
+cd ../Oauth2
+uv run server.py
+
+# 2. Register OpenSentry client (see OAuth2 Setup Guide above)
+
+# 3. Configure OpenSentry to use OAuth2 (via /settings)
+```
+
+---
+
+## 🤝 Contributing
+
+Contributions welcome! Whether it's bug reports, feature requests, or code contributions.
+
+- 🐛 **Report bugs**: [Open an issue](https://github.com/yourusername/OpenSentry/issues)
+- 💡 **Request features**: [Start a discussion](https://github.com/yourusername/OpenSentry/discussions)
+- 🔧 **Submit code**: Fork, develop, and create a pull request
+
+---
+
+## 📄 License
+
+MIT License - See [LICENSE](LICENSE) for details.
+
+**Free to use, modify, and deploy anywhere.**
+
+---
+
+## 🛡️ Security Best Practices
+
+### For Production Deployments
+
+- [ ] Change default credentials (`OPENSENTRY_USER`, `OPENSENTRY_PASS`)
+- [ ] Generate strong random `OPENSENTRY_SECRET` (64+ characters)
+- [ ] Use HTTPS with reverse proxy (nginx, Traefik, Caddy)
+- [ ] Set up `OPENSENTRY_API_TOKEN` for `/status` endpoint protection
+- [ ] Enable OAuth2 for centralized authentication
+- [ ] Regular backups of `config.json` and `archives/`
+- [ ] Keep dependencies updated (`uv sync` or `pip install --upgrade`)
+- [ ] Monitor logs for unauthorized access attempts
+- [ ] Use firewall rules to restrict access to trusted networks
+- [ ] Disable mDNS in production (`OPENSENTRY_MDNS_DISABLE=1`)
+
+### HTTPS Setup with Nginx
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name opensentry.yourdomain.com;
+
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # WebSocket support for live streams
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+---
+
+## 🌟 Why OpenSentry?
+
+- ✅ **Privacy-First** - All processing happens locally, no cloud required
+- ✅ **Self-Hosted** - You control your data and infrastructure
+- ✅ **Flexible Authentication** - Start simple, scale with OAuth2/SSO
+- ✅ **Open Source** - Audit, modify, and extend as needed
+- ✅ **Production-Ready** - Used in real-world deployments
+- ✅ **Free Forever** - MIT license, no hidden costs
+
+---
+
+<p align="center">
+  <strong>Take control of your security camera system.</strong><br>
+  <em>Self-hosted. Private. Yours.</em>
+</p>
+
+<p align="center">
+  <a href="#-quick-start">Get Started →</a> |
+  <a href="#-oauth2-setup-guide">OAuth2 Setup →</a> |
+  <a href="#-related-projects">Related Projects →</a>
+</p>

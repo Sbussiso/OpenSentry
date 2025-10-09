@@ -258,36 +258,50 @@ def oauth2_login():
     ok, info = _probe_oauth2(auth_config.get('oauth2_base_url') or '')
     if not ok:
         nxt = session.get('next') or request.args.get('next') or url_for('index')
-        # Render error page
+        # Render error page with fallback options
         error_html = f"""
         <!DOCTYPE html>
         <html lang="en">
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1">
-          <title>OAuth2 Server Unavailable</title>
+          <title>OAuth2 Unavailable - OpenSentry</title>
           <style>
-            body {{ font-family: system-ui, Arial, sans-serif; background:#0b0e14; color:#eaeef2; display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }}
-            .card {{ background:#11161f; padding:24px 28px; border-radius:12px; max-width:480px; box-shadow:0 6px 30px rgba(0,0,0,0.35); }}
-            h1 {{ margin:0 0 14px; font-size:20px; color:#f87171; }}
-            p {{ margin:10px 0; line-height:1.5; }}
-            code {{ background:#0e131b; padding:2px 6px; border-radius:6px; }}
-            .btn {{ display:inline-block; margin:14px 8px 0 0; padding:10px 14px; border:0; border-radius:8px; background:#3b82f6; color:#fff; font-weight:600; cursor:pointer; text-decoration:none; }}
-            .btn:hover {{ background:#2563eb; }}
-            .btn-secondary {{ background:#374151; }}
-            .btn-secondary:hover {{ background:#4b5563; }}
+            :root {{ color-scheme: dark; }}
+            body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin:0; background:#0b0e14; color:#eaeef2; }}
+            header {{ padding:14px 18px; background:#11161f; border-bottom:1px solid #1c2431; }}
+            h1 {{ margin:0; font-size:18px; }}
+            main {{ padding:16px 0; }}
+            .container {{ max-width:800px; margin:0 auto; padding:0 16px; }}
+            .card {{ background:#11161f; border:1px solid #1c2431; border-radius:12px; padding:16px; box-shadow:0 6px 30px rgba(0,0,0,0.25); }}
+            .muted {{ color:#93a3b5; }}
+            code {{ background:#0e131b; border:1px solid #2a3342; padding:2px 6px; border-radius:6px; }}
+            .actions {{ display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; }}
+            a.btn {{ padding:10px 14px; border-radius:8px; text-decoration:none; font-weight:600; cursor:pointer; }}
+            a.btn.primary {{ background:#3b82f6; color:#fff; }}
+            a.btn.primary:hover {{ background:#2563eb; }}
+            a.btn.secondary {{ background:#374151; color:#eaeef2; }}
+            a.btn.secondary:hover {{ background:#1f2937; }}
           </style>
         </head>
         <body>
-          <div class="card">
-            <h1>OAuth2 Server Unavailable</h1>
-            <p>Unable to connect to the OAuth2 authorization server:</p>
-            <p><code>{auth_config.get('oauth2_base_url') or 'Not configured'}</code></p>
-            <p>Error: <code>{info}</code></p>
-            <p>Please check your OAuth2 settings or use the local login fallback.</p>
-            <a class="btn btn-secondary" href="/oauth2/fallback?next={urllib.parse.quote(nxt)}">Use Local Login</a>
-            <a class="btn" href="/settings">Check Settings</a>
-          </div>
+          <header>
+            <h1>OAuth2 Unavailable</h1>
+          </header>
+          <main>
+            <div class="container">
+              <div class="card">
+                <p class="muted">The configured OAuth2 server appears to be unavailable.</p>
+                <p>Base URL: <code>{auth_config.get('oauth2_base_url') or 'Not configured'}</code></p>
+                <p class="muted">Detail: {info}</p>
+                <div class="actions">
+                  <a class="btn primary" href="/oauth2/login?next={urllib.parse.quote(nxt)}">Retry OAuth2 login</a>
+                  <a class="btn secondary" href="/oauth2/fallback?next={urllib.parse.quote(nxt)}">Use local login for now</a>
+                  <a class="btn secondary" href="/settings">Settings</a>
+                </div>
+              </div>
+            </div>
+          </main>
         </body>
         </html>
         """
