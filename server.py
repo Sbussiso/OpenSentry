@@ -7,11 +7,12 @@ import atexit
 import numpy as np
 import uuid
 import socket
+import json
 try:
     import face_recognition  # type: ignore
 except Exception:
     face_recognition = None  # type: ignore
-from flask import Flask, Response, request, redirect, url_for, send_file, abort, session, render_template_string
+from flask import Flask, Response, request, redirect, url_for, send_file, abort, session, render_template_string, jsonify
 from helpers.camera import CameraStream
 from helpers.yolo import get_yolo_model
 from helpers.faces import get_face_cascade
@@ -44,6 +45,7 @@ DEVICE_NAME = os.environ.get('OPENSENTRY_DEVICE_NAME', 'OpenSentry')
 API_TOKEN = os.environ.get('OPENSENTRY_API_TOKEN', '').strip()
 MDNS_DISABLE = os.environ.get('OPENSENTRY_MDNS_DISABLE', '0') in ('1', 'true', 'TRUE')
 _mdns_adv = None
+_startup_logged = False
 
 # Logging configuration
 LOG_LEVEL = (os.environ.get('OPENSENTRY_LOG_LEVEL', 'INFO') or 'INFO').upper()
@@ -62,25 +64,132 @@ app.config.setdefault('SESSION_COOKIE_HTTPONLY', True)
 _LOGIN_USER = os.environ.get('OPENSENTRY_USER', 'admin')
 _LOGIN_PASS = os.environ.get('OPENSENTRY_PASS', 'admin')
 
+# --- OAuth2 authentication support ---
+import base64
+import hashlib
+import hmac
+import secrets
+import urllib.parse
+
+# Auth config defaults (loaded from config.json)
+auth_config = {
+    'auth_mode': 'local',  # 'local' or 'oauth2'
+    'oauth2_base_url': '',
+    'oauth2_client_id': '',
+    'oauth2_client_secret': '',
+    'oauth2_scope': 'openid profile email offline_access',
+}
+
+def _gen_pkce() -> tuple[str, str]:
+    """Generate PKCE code_verifier and code_challenge for OAuth2 flow."""
+    verifier = base64.urlsafe_b64encode(os.urandom(40)).decode().rstrip("=")
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()
+    ).decode().rstrip("=")
+    return verifier, challenge
+
+def _b64url(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).decode().rstrip('=')
+
+def _b64urldecode(s: str) -> bytes:
+    pad = '=' * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+def _make_state(extra: dict | None = None) -> str:
+    payload: dict = {"t": int(time.time()), "n": secrets.token_urlsafe(16)}
+    if extra:
+        payload.update(extra)
+    raw = json.dumps(payload, separators=(',', ':'), sort_keys=True).encode()
+    key = app.secret_key.encode() if isinstance(app.secret_key, str) else app.secret_key
+    sig = hmac.new(key, raw, hashlib.sha256).digest()
+    return f"{_b64url(raw)}.{_b64url(sig)}"
+
+def _verify_state(state: str, max_age_sec: int = 600) -> dict | None:
+    try:
+        raw_b64, sig_b64 = state.split('.', 1)
+        raw = _b64urldecode(raw_b64)
+        sig = _b64urldecode(sig_b64)
+        key = app.secret_key.encode() if isinstance(app.secret_key, str) else app.secret_key
+        expected = hmac.new(key, raw, hashlib.sha256).digest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        data = json.loads(raw.decode())
+        t = int(data.get('t') or 0)
+        if not t or (int(time.time()) - t) > max_age_sec:
+            return None
+        return data
+    except Exception:
+        return None
+
+def _probe_oauth2(base_url: str) -> tuple[bool, dict | str]:
+    """Validate OAuth2 base URL by fetching OIDC well-known metadata.
+    Returns (ok, info) where info is metadata dict on success or error string on failure.
+    """
+    import requests
+
+    def _fetch(url: str):
+        try:
+            r = requests.get(url, timeout=3)
+            if r.status_code != 200:
+                return False, f"status {r.status_code}"
+            data = r.json()
+            return True, data
+        except Exception as e:
+            return False, str(e)
+
+    base = base_url.rstrip("/")
+    # Try OIDC discovery first
+    ok, info = _fetch(f"{base}/.well-known/openid-configuration")
+    if not ok:
+        # Fallback to RFC8414 location
+        ok, info = _fetch(f"{base}/.well-known/oauth-authorization-server")
+        if not ok:
+            return False, info
+    # Minimal validation
+    if not isinstance(info, dict):
+        return False, "invalid metadata"
+    required = ("issuer", "authorization_endpoint", "token_endpoint")
+    if not all(k in info and isinstance(info[k], str) and info[k] for k in required):
+        return False, "missing required fields"
+    return True, info
+
 def _auth_allowed() -> bool:
-    # Allow unauthenticated access to only the login route
+    # Allow unauthenticated access to only the login and OAuth2 routes
     ep = request.endpoint or ''
-    if ep in ('login', 'static', 'health', 'favicon', 'status'):
+    if ep in ('login', 'oauth2_login', 'oauth2_callback', 'oauth2_fallback', 'static', 'health', 'favicon', 'status'):
         return True
     return bool(session.get('logged_in'))
 
 
 @app.before_request
 def _require_login():
-    # Enforce login before accessing any route except /login
+    # Enforce login before accessing any route except /login and OAuth2 routes
     if _auth_allowed():
         return None
+    # Check if OAuth2 mode is enabled
+    if auth_config.get('auth_mode') == 'oauth2':
+        # If user opted into temporary local-login fallback, route to local login
+        if session.get('oauth2_fallback'):
+            nxt = request.full_path if request.query_string else request.path
+            return redirect(url_for('login', next=nxt, fallback='1'))
+        # Preserve next URL and redirect to OAuth2 login
+        session['next'] = request.full_path if request.query_string else request.path
+        return redirect(url_for('oauth2_login'))
+    # Otherwise redirect to local login
     nxt = request.full_path if request.query_string else request.path
     return redirect(url_for('login', next=nxt))
 
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    # If OAuth2 mode is active and no fallback requested, redirect to OAuth2 login
+    allow_fallback = bool(request.args.get('fallback')) or bool(session.get('oauth2_fallback'))
+    # If user explicitly requested fallback, enable it for this session
+    if request.method == 'GET' and request.args.get('fallback'):
+        session['oauth2_fallback'] = True
+    if auth_config.get('auth_mode') == 'oauth2' and not allow_fallback:
+        return redirect(url_for('oauth2_login'))
+
     err = ''
     nxt = request.args.get('next') or request.form.get('next') or url_for('index')
     if request.method == 'POST':
@@ -133,6 +242,174 @@ def login():
 def logout():
     session.clear()
     return redirect(url_for('login'))
+
+# ---------- OAuth2 login flow ----------
+@app.route('/oauth2/fallback')
+def oauth2_fallback():
+    """Enable a one-time local-login fallback for this session and redirect to login."""
+    session['oauth2_fallback'] = True
+    dest = request.args.get('next') or session.get('next') or url_for('index')
+    return redirect(url_for('login', next=dest, fallback='1'))
+
+@app.route('/oauth2/login')
+def oauth2_login():
+    if auth_config.get('auth_mode') != 'oauth2':
+        return redirect(url_for('login'))
+    ok, info = _probe_oauth2(auth_config.get('oauth2_base_url') or '')
+    if not ok:
+        nxt = session.get('next') or request.args.get('next') or url_for('index')
+        # Render error page
+        error_html = f"""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>OAuth2 Server Unavailable</title>
+          <style>
+            body {{ font-family: system-ui, Arial, sans-serif; background:#0b0e14; color:#eaeef2; display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }}
+            .card {{ background:#11161f; padding:24px 28px; border-radius:12px; max-width:480px; box-shadow:0 6px 30px rgba(0,0,0,0.35); }}
+            h1 {{ margin:0 0 14px; font-size:20px; color:#f87171; }}
+            p {{ margin:10px 0; line-height:1.5; }}
+            code {{ background:#0e131b; padding:2px 6px; border-radius:6px; }}
+            .btn {{ display:inline-block; margin:14px 8px 0 0; padding:10px 14px; border:0; border-radius:8px; background:#3b82f6; color:#fff; font-weight:600; cursor:pointer; text-decoration:none; }}
+            .btn:hover {{ background:#2563eb; }}
+            .btn-secondary {{ background:#374151; }}
+            .btn-secondary:hover {{ background:#4b5563; }}
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <h1>OAuth2 Server Unavailable</h1>
+            <p>Unable to connect to the OAuth2 authorization server:</p>
+            <p><code>{auth_config.get('oauth2_base_url') or 'Not configured'}</code></p>
+            <p>Error: <code>{info}</code></p>
+            <p>Please check your OAuth2 settings or use the local login fallback.</p>
+            <a class="btn btn-secondary" href="/oauth2/fallback?next={urllib.parse.quote(nxt)}">Use Local Login</a>
+            <a class="btn" href="/settings">Check Settings</a>
+          </div>
+        </body>
+        </html>
+        """
+        return (error_html, 503)
+    meta = info
+    client_id = (auth_config.get('oauth2_client_id') or '').strip()
+    if not client_id:
+        return ("Missing oauth2_client_id in settings", 400)
+    scope = (auth_config.get('oauth2_scope') or 'openid').strip()
+    # Make session permanent to survive OAuth redirects
+    session.permanent = True
+    # Generate PKCE values
+    code_verifier, code_challenge = _gen_pkce()
+    # Embed code_verifier in the signed state so we can retrieve it even if session is lost
+    state = _make_state(extra={'v': code_verifier})
+    session['oauth2_state'] = state
+    session['code_verifier'] = code_verifier
+    redirect_uri = urllib.parse.urljoin(request.host_url, 'oauth2/callback')
+    auth_url = meta.get('authorization_endpoint')
+    params = {
+        'response_type': 'code',
+        'client_id': client_id,
+        'redirect_uri': redirect_uri,
+        'scope': scope,
+        'state': state,
+        'code_challenge_method': 'S256',
+        'code_challenge': code_challenge,
+    }
+    logger.info(f"OAuth2 login: state={state[:16]}..., redirect_uri={redirect_uri}")
+    return redirect(auth_url + '?' + urllib.parse.urlencode(params))
+
+@app.route('/oauth2/callback')
+def oauth2_callback():
+    if auth_config.get('auth_mode') != 'oauth2':
+        return redirect(url_for('login'))
+    import requests
+    state = request.args.get('state')
+    code = request.args.get('code')
+    expected = session.get('oauth2_state')
+    code_verifier_in_session = session.get('code_verifier')
+
+    # Debug logging
+    cookie_present = bool(request.cookies.get(app.session_cookie_name))
+    state_verified = _verify_state(state) if state else None
+    logger.info(f"OAuth2 callback: got_state={(state or '')[:16]}..., expected={(expected or '')[:16]}..., cookie_present={cookie_present}, code_verifier_present={bool(code_verifier_in_session)}, state_verified={bool(state_verified)}")
+
+    valid_state = (expected and state == expected) or (state and _verify_state(state) is not None)
+    if not code or not state or not valid_state:
+        logger.error(f"OAuth2 callback validation failed: code={bool(code)}, state={bool(state)}, valid_state={valid_state}")
+        return ("Invalid OAuth2 callback", 400)
+    ok, info = _probe_oauth2(auth_config.get('oauth2_base_url') or '')
+    if not ok:
+        nxt = session.get('next') or url_for('index')
+        error_html = f"""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <title>OAuth2 Server Unavailable</title>
+          <style>
+            body {{ font-family: system-ui, Arial, sans-serif; background:#0b0e14; color:#eaeef2; padding:20px; }}
+            .card {{ background:#11161f; padding:24px; border-radius:12px; max-width:600px; margin:40px auto; }}
+            h1 {{ color:#f87171; }}
+            code {{ background:#0e131b; padding:2px 6px; border-radius:6px; }}
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <h1>OAuth2 Server Unavailable</h1>
+            <p>Error: <code>{info}</code></p>
+            <p><a href="/oauth2/fallback?next={urllib.parse.quote(nxt)}">Use Local Login</a></p>
+          </div>
+        </body>
+        </html>
+        """
+        return (error_html, 503)
+    # Retrieve code_verifier from session for PKCE, or extract from verified state
+    code_verifier = session.get('code_verifier')
+    if not code_verifier:
+        # Session was lost; try to recover code_verifier from the signed state
+        state_data = _verify_state(state)
+        if state_data and 'v' in state_data:
+            code_verifier = state_data['v']
+            logger.info(f"OAuth2 callback: recovered code_verifier from state")
+        else:
+            return ("Missing PKCE verifier in session. Please try logging in again.", 400)
+
+    meta = info
+    token_url = meta.get('token_endpoint')
+    redirect_uri = urllib.parse.urljoin(request.host_url, 'oauth2/callback')
+    data = {
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': redirect_uri,
+        'client_id': auth_config.get('oauth2_client_id') or '',
+        'code_verifier': code_verifier,
+    }
+    # If a client secret is configured (confidential client), send it via POST (client_secret_post)
+    cs = (auth_config.get('oauth2_client_secret') or '').strip()
+    if cs:
+        data['client_secret'] = cs
+
+    # Debug logging
+    logger.info(f"Token exchange: url={token_url}, client_id={data.get('client_id')}, has_secret={bool(cs)}")
+
+    try:
+        r = requests.post(token_url, data=data, timeout=5)
+        if r.status_code != 200:
+            logger.error(f"Token exchange failed: {r.status_code}, response={r.text[:200]}")
+            return (f"Token exchange failed: {r.status_code}", 502)
+        tok = r.json()
+    except Exception as e:
+        logger.error(f"Token exchange exception: {e}")
+        return (f"Token exchange error: {e}", 502)
+    # Minimal session establishment; in a full impl we would validate id_token
+    session.pop('oauth2_state', None)
+    session.pop('code_verifier', None)
+    session['logged_in'] = True
+    session['user'] = 'oauth2'
+    session['oauth2_tokens'] = {k: tok.get(k) for k in ('access_token','refresh_token','id_token','expires_in','token_type')}
+    dest = session.pop('next', None) or url_for('index')
+    return redirect(dest)
 
 # Health and favicon endpoints
 @app.route('/health')
@@ -244,6 +521,9 @@ if _cfg:
                 motion_detection_config.update(_cfg['motion_detection'])
             if 'face_detection' in _cfg:
                 face_detection_config.update(_cfg['face_detection'])
+            # Load auth config if present
+            if 'auth' in _cfg and isinstance(_cfg['auth'], dict):
+                auth_config.update(_cfg['auth'])
             # read existing device_id if present
             DEVICE_ID = _cfg.get('device_id') if isinstance(_cfg, dict) else None
     except Exception:
@@ -281,13 +561,27 @@ atexit.register(_on_shutdown)
 
 @app.before_request
 def _ensure_camera_started():
+    global _startup_logged
     if not camera_stream.running:
         camera_stream.start()
+    # One-time startup log and mDNS init for Gunicorn/WSGI path (Flask>=3 removed before_first_request)
+    if not _startup_logged:
+        try:
+            logger.info("Device ID: %s, Version: %s, mDNS: %s", str(DEVICE_ID), str(APP_VERSION), 'ENABLED' if not MDNS_DISABLE else 'DISABLED')
+        except Exception:
+            pass
+        _startup_logged = True
+    try:
+        _start_mdns_advertiser()
+    except Exception:
+        pass
 
 # mDNS advertiser lifecycle
 def _start_mdns_advertiser():
     global _mdns_adv
     if MDNS_DISABLE:
+        return
+    if _mdns_adv is not None:
         return
     try:
         txt = {
@@ -307,6 +601,16 @@ def _start_mdns_advertiser():
     except Exception as e:
         logger.warning('mDNS advertise failed: %s', e)
 
+
+@app.after_request
+def _add_observability_headers(resp):
+    try:
+        resp.headers['Server'] = f"OpenSentry/{APP_VERSION}"
+        resp.headers['X-OpenSentry-Version'] = str(APP_VERSION)
+        resp.headers['X-OpenSentry-Device'] = str(DEVICE_ID or '')
+    except Exception:
+        pass
+    return resp
 
 
 def _find_available_port(start_port: int, attempts: int = 10) -> int:
@@ -335,8 +639,13 @@ def generate_frames():
     while True:
         frame = camera_stream.get_frame()
         if frame is None:
-            time.sleep(0.1)
-            continue
+            # Optional placeholder to make streams testable without a camera
+            if os.environ.get('OPENSENTRY_ALLOW_PLACEHOLDER', '0') in ('1', 'true', 'TRUE'):
+                frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(frame, 'NO CAMERA', (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+            else:
+                time.sleep(0.1)
+                continue
 
         # FPS limit
         now_ts = time.time()
@@ -1074,6 +1383,50 @@ def settings():
                             pass
             return redirect(url_for('settings'))
 
+        # Handle OAuth2 authentication settings
+        if action == 'update_auth':
+            auth_mode_in = (request.form.get('auth_mode') or '').strip().lower()
+            oauth2_base_url_in = (request.form.get('oauth2_base_url') or '').strip()
+            oauth2_client_id_in = (request.form.get('oauth2_client_id') or '').strip()
+            oauth2_client_secret_in = (request.form.get('oauth2_client_secret') or '').strip()
+            oauth2_scope_in = (request.form.get('oauth2_scope') or 'openid profile email offline_access').strip()
+
+            if auth_mode_in not in ('local', 'oauth2'):
+                # Invalid mode; ignore
+                return redirect(url_for('settings'))
+
+            # If selecting oauth2, validate base_url via well-known fetch
+            if auth_mode_in == 'oauth2':
+                ok, info = _probe_oauth2(oauth2_base_url_in)
+                if not ok:
+                    logger.error(f"OAuth2 validation failed: {info}")
+                    # For now, just redirect back to settings. In production, you might want to show an error message.
+                    return redirect(url_for('settings'))
+                if not oauth2_client_id_in:
+                    logger.error("OAuth2 client_id required but not provided")
+                    return redirect(url_for('settings'))
+
+            with settings_lock:
+                auth_config['auth_mode'] = auth_mode_in
+                if auth_mode_in == 'oauth2':
+                    auth_config['oauth2_base_url'] = oauth2_base_url_in
+                    auth_config['oauth2_client_id'] = oauth2_client_id_in
+                    auth_config['oauth2_client_secret'] = oauth2_client_secret_in
+                    auth_config['oauth2_scope'] = oauth2_scope_in or 'openid profile email offline_access'
+                else:
+                    auth_config['oauth2_base_url'] = ''
+                    auth_config['oauth2_client_id'] = ''
+                    auth_config['oauth2_client_secret'] = ''
+                    auth_config['oauth2_scope'] = 'openid profile email offline_access'
+
+                # Persist config to disk
+                try:
+                    _save_config(CONFIG_PATH, object_detection_config, motion_detection_config, face_detection_config, auth_config=auth_config)
+                except Exception as e:
+                    logger.error(f"Failed to save auth config: {e}")
+
+            return redirect(url_for('settings'))
+
         select_all_flag = ('select_all' in request.form)
         selected = set(request.form.getlist('classes'))
         face_archive_flag = ('face_archive_unknown' in request.form)
@@ -1217,8 +1570,33 @@ def settings():
         faces_ok=faces_ok,
         face_recognition_available=face_recognition_available,
         unknowns=unknowns_for_ui,
+        device_id=str(DEVICE_ID or ''),
+        port=int(APP_PORT),
+        mdns_enabled=(not MDNS_DISABLE),
+        app_version=str(APP_VERSION),
+        auth_mode=str(auth_config.get('auth_mode', 'local')),
+        oauth2_base_url=str(auth_config.get('oauth2_base_url', '')),
+        oauth2_client_id=str(auth_config.get('oauth2_client_id', '')),
+        oauth2_client_secret=str(auth_config.get('oauth2_client_secret', '')),
+        oauth2_scope=str(auth_config.get('oauth2_scope', 'openid profile email offline_access')),
     )
     return page_html
+
+@app.route('/api/oauth2/test')
+def api_oauth2_test():
+    """Test OAuth2 connection by fetching well-known metadata."""
+    base = (request.args.get('base_url') or '').strip()
+    if not base:
+        return jsonify({"ok": False, "error": "base_url required"}), 400
+    ok, info = _probe_oauth2(base)
+    if ok:
+        return jsonify({
+            "ok": True,
+            "issuer": info.get("issuer"),
+            "authorization_endpoint": info.get("authorization_endpoint"),
+            "token_endpoint": info.get("token_endpoint")
+        })
+    return jsonify({"ok": False, "error": info}), 502
 
 @app.route('/video_feed')
 def video_feed():
@@ -1282,6 +1660,7 @@ def main():
     # Update global APP_PORT so /status and mDNS advertise correctly
     APP_PORT = chosen
     logger.info("Binding HTTP server on port %d (preferred %d)", chosen, preferred)
+    logger.info("Device ID: %s, Version: %s, mDNS: %s", str(DEVICE_ID), str(APP_VERSION), 'ENABLED' if not MDNS_DISABLE else 'DISABLED')
     logger.info("Access the feed at http://0.0.0.0:%d/video_feed", chosen)
     # Start mDNS advertisement after selecting the port
     try:

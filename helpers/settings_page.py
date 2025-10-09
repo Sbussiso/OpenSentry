@@ -26,6 +26,15 @@ def render_settings_page(
     faces_ok: bool,
     face_recognition_available: bool,
     unknowns: list = [],
+    device_id: str = '',
+    port: int = 5000,
+    mdns_enabled: bool = True,
+    app_version: str = '',
+    auth_mode: str = 'local',
+    oauth2_base_url: str = '',
+    oauth2_client_id: str = '',
+    oauth2_client_secret: str = '',
+    oauth2_scope: str = 'openid profile email offline_access',
 ) -> str:
     options_html = ''
     if names:
@@ -40,6 +49,10 @@ def render_settings_page(
     face_dedup_checked = 'checked' if f_dedup else ''
     method_embed_checked = 'checked' if f_method == 'embedding' else ''
     method_phash_checked = 'checked' if f_method == 'phash' else ''
+
+    # OAuth2 settings
+    auth_mode_local_checked = 'checked' if auth_mode == 'local' else ''
+    auth_mode_oauth2_checked = 'checked' if auth_mode == 'oauth2' else ''
 
     raw_class = 'ok' if raw_ok else 'down'
     raw_text = 'Active' if raw_ok else 'Down'
@@ -106,7 +119,14 @@ def render_settings_page(
             .unknowns-grid .meta { padding:8px; display:flex; justify-content:space-between; align-items:center; color:var(--muted); }
             .unknowns-grid .actions { display:flex; gap:8px; padding:8px; align-items:center; border-top:1px solid var(--border); flex-wrap: wrap; }
             .unknowns-grid .actions input[type=text] { flex: 1 1 240px; min-width: 240px; padding:8px; font-size: 14px; }
-            .unknowns-grid .actions button { padding:8px 12px; }
+            .auth-mode-options { display:flex; gap:16px; margin:12px 0; }
+            .oauth2-fields { display:grid; gap:12px; margin-top:12px; }
+            .oauth2-fields label { display:flex; flex-direction:column; gap:4px; }
+            .oauth2-fields input[type=text] { width:100%; }
+            #oauth2_test_btn { margin-top:8px; }
+            #oauth2_test_result { margin-top:8px; padding:8px; border-radius:6px; display:none; }
+            #oauth2_test_result.success { background:rgba(22,163,74,0.15); color:#86efac; border:1px solid rgba(22,163,74,0.35); }
+            #oauth2_test_result.error { background:rgba(239,68,68,0.15); color:#fecaca; border:1px solid rgba(239,68,68,0.35); }
     """
     hdr = header_html('Settings')
 
@@ -115,13 +135,55 @@ def render_settings_page(
     <html lang=\"en\">
     <head>
         <meta charset=\"utf-8\">
-        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
         <title>OpenSentry Settings</title>
         <style>{css}</style>
     </head>
     <body>
         {hdr}
         <div class=\"form-wrap\">
+            <fieldset>
+                <legend>Device info</legend>
+                <div class=\"status-grid\">
+                    <div class=\"status-item\"><span>Device ID</span><span><code>{device_id}</code></span></div>
+                    <div class=\"status-item\"><span>Version</span><span><code>{app_version}</code></span></div>
+                    <div class=\"status-item\"><span>HTTP Port</span><span><code>{port}</code></span></div>
+                    <div class=\"status-item\"><span>mDNS</span><span class=\"pill {('ok' if mdns_enabled else 'down')}\">{('ENABLED' if mdns_enabled else 'DISABLED')}</span></div>
+                </div>
+            </fieldset>
+            <form method=\"post\" action=\"/settings\">
+                <input type=\"hidden\" name=\"action\" value=\"update_auth\">
+                <fieldset>
+                    <legend>Authentication Settings</legend>
+                    <div class=\"auth-mode-options\">
+                        <label><input type=\"radio\" name=\"auth_mode\" value=\"local\" {auth_mode_local_checked}> Local Authentication (username/password)</label>
+                        <label><input type=\"radio\" name=\"auth_mode\" value=\"oauth2\" {auth_mode_oauth2_checked}> OAuth2 Authentication</label>
+                    </div>
+                    <div id=\"oauth2_settings\" style=\"display:{'block' if auth_mode == 'oauth2' else 'none'};\">
+                        <div class=\"oauth2-fields\">
+                            <label>
+                                <span>OAuth2 Server Base URL</span>
+                                <input type=\"text\" name=\"oauth2_base_url\" value=\"{oauth2_base_url}\" placeholder=\"http://127.0.0.1:8000\">
+                            </label>
+                            <label>
+                                <span>Client ID</span>
+                                <input type=\"text\" name=\"oauth2_client_id\" value=\"{oauth2_client_id}\" placeholder=\"opensentry-device\">
+                            </label>
+                            <label>
+                                <span>Client Secret (optional, for confidential clients)</span>
+                                <input type=\"text\" name=\"oauth2_client_secret\" value=\"{oauth2_client_secret}\" placeholder=\"\">
+                            </label>
+                            <label>
+                                <span>Scope</span>
+                                <input type=\"text\" name=\"oauth2_scope\" value=\"{oauth2_scope}\" placeholder=\"openid profile email offline_access\">
+                            </label>
+                        </div>
+                        <button type=\"button\" id=\"oauth2_test_btn\" class=\"btn\">Test OAuth2 Connection</button>
+                        <div id=\"oauth2_test_result\"></div>
+                    </div>
+                    <p><small><strong>Warning:</strong> Switching to OAuth2 will require you to authenticate via the configured OAuth2 server. Make sure the server is accessible and properly configured before saving.</small></p>
+                </fieldset>
+                <p><button type=\"submit\">Save Authentication Settings</button></p>
+            </form>
             <fieldset>
                 <legend>Camera route status</legend>
                 <div class=\"status-grid\">
@@ -220,6 +282,59 @@ def render_settings_page(
                 update();
             }}
             ['md_threshold','md_min_area','md_kernel','md_iterations','md_pad'].forEach(bind);
+
+            // OAuth2 settings toggle
+            var authModeRadios = document.querySelectorAll('input[name="auth_mode"]');
+            var oauth2Settings = document.getElementById('oauth2_settings');
+            authModeRadios.forEach(function(radio) {{
+                radio.addEventListener('change', function() {{
+                    if (this.value === 'oauth2') {{
+                        oauth2Settings.style.display = 'block';
+                    }} else {{
+                        oauth2Settings.style.display = 'none';
+                    }}
+                }});
+            }});
+
+            // OAuth2 test button
+            var testBtn = document.getElementById('oauth2_test_btn');
+            var testResult = document.getElementById('oauth2_test_result');
+            if (testBtn) {{
+                testBtn.addEventListener('click', function() {{
+                    var baseUrl = document.querySelector('input[name="oauth2_base_url"]').value;
+                    if (!baseUrl) {{
+                        testResult.className = 'error';
+                        testResult.style.display = 'block';
+                        testResult.textContent = 'Please enter an OAuth2 Server Base URL';
+                        return;
+                    }}
+                    testBtn.disabled = true;
+                    testBtn.textContent = 'Testing...';
+                    testResult.style.display = 'none';
+
+                    fetch('/api/oauth2/test?base_url=' + encodeURIComponent(baseUrl))
+                        .then(function(r) {{ return r.json(); }})
+                        .then(function(data) {{
+                            testBtn.disabled = false;
+                            testBtn.textContent = 'Test OAuth2 Connection';
+                            testResult.style.display = 'block';
+                            if (data.ok) {{
+                                testResult.className = 'success';
+                                testResult.textContent = 'Success! Connected to: ' + (data.issuer || baseUrl);
+                            }} else {{
+                                testResult.className = 'error';
+                                testResult.textContent = 'Error: ' + (data.error || 'Unknown error');
+                            }}
+                        }})
+                        .catch(function(err) {{
+                            testBtn.disabled = false;
+                            testBtn.textContent = 'Test OAuth2 Connection';
+                            testResult.style.display = 'block';
+                            testResult.className = 'error';
+                            testResult.textContent = 'Error: ' + err.message;
+                        }});
+                }});
+            }}
         }})();
         </script>
     </body>

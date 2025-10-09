@@ -1,4 +1,6 @@
 import time
+import os
+import numpy as np
 import cv2
 
 
@@ -21,8 +23,13 @@ def create_motion_generator(camera_stream, get_settings):
         while True:
             frame = camera_stream.get_frame()
             if frame is None:
-                time.sleep(0.1)
-                continue
+                # Optional placeholder to make streams testable without a camera
+                if os.environ.get('OPENSENTRY_ALLOW_PLACEHOLDER', '0') in ('1', 'true', 'TRUE'):
+                    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                    cv2.putText(frame, 'NO CAMERA', (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+                else:
+                    time.sleep(0.1)
+                    continue
 
             cfg = get_settings()
             m_thresh = int(cfg.get('threshold', 25))
