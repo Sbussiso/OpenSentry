@@ -1,4 +1,3 @@
-import cv2
 import threading
 import time
 import os
@@ -8,11 +7,15 @@ import numpy as np
 import uuid
 import socket
 import json
+import io
+from collections import deque
 try:
     import face_recognition  # type: ignore
 except Exception:
     face_recognition = None  # type: ignore
 from flask import Flask, Response, request, redirect, url_for, send_file, abort, session, render_template_string, jsonify
+from io import BytesIO
+import cv2
 from helpers.camera import CameraStream
 from helpers.yolo import get_yolo_model
 from helpers.faces import get_face_cascade
@@ -44,6 +47,8 @@ APP_VERSION = os.environ.get('OPENSENTRY_VERSION', '0.1.0')
 DEVICE_NAME = os.environ.get('OPENSENTRY_DEVICE_NAME', 'OpenSentry')
 API_TOKEN = os.environ.get('OPENSENTRY_API_TOKEN', '').strip()
 MDNS_DISABLE = os.environ.get('OPENSENTRY_MDNS_DISABLE', '0') in ('1', 'true', 'TRUE')
+
+# mDNS state
 _mdns_adv = None
 _startup_logged = False
 
@@ -55,8 +60,48 @@ logging.basicConfig(
 )
 logger = logging.getLogger('opensentry')
 
+# In-memory ring buffer for recent logs (download via /logs/download)
+class _RingBufferHandler(logging.Handler):
+    def __init__(self, max_bytes: int = 1_048_576, max_lines: int = 10_000):
+        super().__init__()
+        self.max_bytes = int(max_bytes)
+        self.max_lines = int(max_lines)
+        self._buf = deque()
+        self._bytes = 0
+        self._lock = threading.Lock()
+
+    def emit(self, record):
+        try:
+            msg = self.format(record) + '\n'
+        except Exception:
+            try:
+                msg = record.getMessage() + '\n'
+            except Exception:
+                msg = '\n'
+        data = msg.encode('utf-8', 'replace')
+        with self._lock:
+            self._buf.append(data)
+            self._bytes += len(data)
+            while self._bytes > self.max_bytes or len(self._buf) > self.max_lines:
+                old = self._buf.popleft()
+                self._bytes -= len(old)
+
+    def dump(self, n: int | None = None) -> bytes:
+        with self._lock:
+            if n is not None and n > 0 and n < len(self._buf):
+                items = list(self._buf)[-n:]
+            else:
+                items = list(self._buf)
+        return b''.join(items)
+
+_logbuf_handler = _RingBufferHandler(
+    max_bytes=int(os.environ.get('OPENSENTRY_LOG_BUFFER_BYTES', '1048576')),
+    max_lines=int(os.environ.get('OPENSENTRY_LOG_BUFFER_LINES', '10000')),
+)
+_logbuf_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s %(name)s: %(message)s'))
+logging.getLogger().addHandler(_logbuf_handler)
+
 # --- Simple session-based authentication ---
-# Configure secret key (set OPENSENTRY_SECRET in environment for production)
 app.secret_key = os.environ.get('OPENSENTRY_SECRET', 'change-this-in-prod')
 app.config.setdefault('SESSION_COOKIE_SAMESITE', 'Lax')
 app.config.setdefault('SESSION_COOKIE_HTTPONLY', True)
@@ -473,6 +518,29 @@ def status():
         'auth_mode': 'token' if API_TOKEN else 'session',
     }
     return (data, 200)
+
+@app.route('/logs/download')
+def logs_download():
+    """Download recent server logs as a text file. Optional query param n=<lines>."""
+    # Parse optional ?n= lines param
+    try:
+        n = int(request.args.get('n', '0'))
+    except Exception:
+        n = 0
+    payload = _logbuf_handler.dump(n if n > 0 else None)
+    if not payload:
+        payload = b'No logs captured yet.\n'
+    buf = io.BytesIO(payload)
+    buf.seek(0)
+    resp = send_file(buf, mimetype='text/plain; charset=utf-8', as_attachment=True, download_name='opensentry-logs.txt')
+    # Prevent caching
+    try:
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0, no-transform'
+        resp.headers['Pragma'] = 'no-cache'
+        resp.headers['Expires'] = '0'
+    except Exception:
+        pass
+    return resp
 
 # Stream output tuning
 OUTPUT_MAX_WIDTH = 960

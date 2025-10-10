@@ -150,6 +150,15 @@ def render_settings_page(
                     <div class=\"status-item\"><span>mDNS</span><span class=\"pill {('ok' if mdns_enabled else 'down')}\">{('ENABLED' if mdns_enabled else 'DISABLED')}</span></div>
                 </div>
             </fieldset>
+            <fieldset>
+                <legend>Diagnostics</legend>
+                <form method="get" action="/logs/download" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    <label for="n" style="color: var(--muted);">Lines (optional)</label>
+                    <input type="number" name="n" min="0" placeholder="All" style="width:120px; background:#0e131b; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:6px 8px;">
+                    <button type="submit">Download Server Logs</button>
+                </form>
+                <p><small>Downloads recent in-memory logs as a text file. Leave lines empty to include all buffered logs.</small></p>
+            </fieldset>
             <form method=\"post\" action=\"/settings\">
                 <input type=\"hidden\" name=\"action\" value=\"update_auth\">
                 <fieldset>
