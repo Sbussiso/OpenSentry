@@ -125,6 +125,18 @@ auth_config = {
     'oauth2_scope': 'openid profile email offline_access',
 }
 
+def _oauth2_enabled() -> bool:
+    """Return True only if OAuth2 mode is selected AND minimally configured.
+    This prevents CI or local runs from failing when OAuth2 isn't set up.
+    """
+    try:
+        mode = str(auth_config.get('auth_mode', 'local')).lower()
+        base = (auth_config.get('oauth2_base_url') or '').strip()
+        cid = (auth_config.get('oauth2_client_id') or '').strip()
+        return (mode == 'oauth2') and bool(base) and bool(cid)
+    except Exception:
+        return False
+
 def _gen_pkce() -> tuple[str, str]:
     """Generate PKCE code_verifier and code_challenge for OAuth2 flow."""
     verifier = base64.urlsafe_b64encode(os.urandom(40)).decode().rstrip("=")
@@ -211,8 +223,8 @@ def _require_login():
     # Enforce login before accessing any route except /login and OAuth2 routes
     if _auth_allowed():
         return None
-    # Check if OAuth2 mode is enabled
-    if auth_config.get('auth_mode') == 'oauth2':
+    # Check if OAuth2 mode is enabled and properly configured
+    if _oauth2_enabled():
         # If user opted into temporary local-login fallback, route to local login
         if session.get('oauth2_fallback'):
             nxt = request.full_path if request.query_string else request.path
@@ -227,13 +239,11 @@ def _require_login():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    # If OAuth2 mode is active and no fallback requested, redirect to OAuth2 login
+    # Allow a local login even if OAuth2 is configured; only redirect to OAuth2 when not posting valid creds
     allow_fallback = bool(request.args.get('fallback')) or bool(session.get('oauth2_fallback'))
     # If user explicitly requested fallback, enable it for this session
     if request.method == 'GET' and request.args.get('fallback'):
         session['oauth2_fallback'] = True
-    if auth_config.get('auth_mode') == 'oauth2' and not allow_fallback:
-        return redirect(url_for('oauth2_login'))
 
     err = ''
     nxt = request.args.get('next') or request.form.get('next') or url_for('index')
@@ -246,6 +256,10 @@ def login():
             return redirect(nxt)
         else:
             err = 'Invalid credentials'
+
+    # If not successfully logged in via local auth, and OAuth2 is enabled without fallback, redirect to OAuth2
+    if not session.get('logged_in') and _oauth2_enabled() and not allow_fallback:
+        return redirect(url_for('oauth2_login'))
     html = f"""
     <!DOCTYPE html>
     <html lang="en">
@@ -298,7 +312,7 @@ def oauth2_fallback():
 
 @app.route('/oauth2/login')
 def oauth2_login():
-    if auth_config.get('auth_mode') != 'oauth2':
+    if not _oauth2_enabled():
         return redirect(url_for('login'))
     ok, info = _probe_oauth2(auth_config.get('oauth2_base_url') or '')
     if not ok:
