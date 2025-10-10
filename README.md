@@ -30,6 +30,7 @@ OpenSentry transforms any Linux device with a webcam into an intelligent securit
 ## 📖 Table of Contents
 
 - [Quick Start](#-quick-start)
+- [Architecture](#-architecture)
 - [Installation](#-installation)
   - [Run from Source](#run-from-source)
   - [Docker Deployment](#docker-deployment)
@@ -62,13 +63,74 @@ uv run server.py
 
 ### Option 2: Docker Compose
 ```bash
-# Start with Docker Compose
-docker compose up -d
+# Build and start using the included compose.yaml
+DOCKER_HOST=unix:///var/run/docker.sock docker compose -f compose.yaml build --pull
+DOCKER_HOST=unix:///var/run/docker.sock docker compose -f compose.yaml up -d
+
+# Tail logs (look for "TurboJPEG enabled for JPEG encoding")
+DOCKER_HOST=unix:///var/run/docker.sock docker compose -f compose.yaml logs -f opensentry
 
 # Access at http://127.0.0.1:5000
 ```
+Note:
+- If you see a warning about multiple compose files, specifying `-f compose.yaml` avoids ambiguity.
+- If you don’t have a camera, set `OPENSENTRY_ALLOW_PLACEHOLDER=1` in `compose.yaml`.
 
 That's it! OpenSentry is now streaming from your camera.
+
+---
+
+## 🏗️ Architecture
+
+OpenSentry is designed for low CPU usage while supporting multiple simultaneous viewers.
+
+- **`server.py`**: App entrypoint. Defines routes, lifecycle, and starts background services.
+- **`helpers/camera.py`**: `CameraStream` captures frames from V4L2 (`/dev/video*`) with low-latency settings.
+- **`helpers/frame_hub.py`**: `Broadcaster` centralizes encoding and fan-out:
+  - Single producer function (`produce_fn`) encodes one JPEG per tick.
+  - Single-slot latest-frame buffer drops backlog to keep latency low.
+  - `multipart_stream()` yields an MJPEG stream shared by all clients (no per-client encoding).
+- **`helpers/encoders.py`**: Uses TurboJPEG when available, otherwise OpenCV JPEG.
+- **Background workers (in `server.py`)**:
+  - `_ObjectsWorker` runs YOLOv8 at a capped FPS, overlays boxes, and publishes to `objects_broadcaster`.
+  - `_MotionWorker` detects motion on downscaled frames, draws ROI, and publishes to `motion_broadcaster`.
+  - Raw stream uses a lightweight producer to encode frames for `raw_broadcaster`.
+  - Faces stream currently renders per-request; can be centralized similarly (FaceWorker + broadcaster).
+- **Discovery**: `helpers/mdns.py` advertises `_opensentry._tcp.local` for LAN discovery.
+- **Deployment**: `Dockerfile` + `compose.yaml` run Gunicorn (gevent) with `GUNICORN_WORKERS=1` for shared in-process broadcasters.
+
+### Data flow
+
+```mermaid
+graph TD
+  A[Camera /dev/video0] -->|BGR frames| B[CameraStream]
+
+  B --> C1[Raw Producer]
+  C1 --> D1[raw_broadcaster]
+  D1 --> E1[Clients /video_feed]
+
+  B --> C2[_MotionWorker]
+  C2 --> D2[motion_broadcaster]
+  D2 --> E2[Clients /video_feed_motion]
+
+  B --> C3[_ObjectsWorker]
+  C3 --> D3[objects_broadcaster]
+  D3 --> E3[Clients /video_feed_objects]
+
+  subgraph Encoding
+    X[helpers/encoders.py] -->|TurboJPEG or OpenCV| D1
+    X --> D2
+    X --> D3
+  end
+```
+
+### Concurrency & performance
+
+- **Single encode per tick** per stream type (raw/motion/objects), shared by all clients.
+- **Latest-frame only** buffer avoids growing queues and keeps latency low.
+- **FPS caps** for workers prevent CPU spikes; output width and JPEG quality configurable.
+- **TurboJPEG** accelerates JPEG encoding when the native lib is present.
+- Designed to support future optimizations (viewer-gated workers, motion-gated YOLO, ROI inference).
 
 ---
 
@@ -99,6 +161,20 @@ uv run server.py
 Visit **http://127.0.0.1:5000** and log in with `admin/admin`.
 
 ### Docker Deployment
+
+#### Using the included compose.yaml
+
+The repo includes a `compose.yaml` preconfigured to map `/dev/video0`, mount `./archives`, and set sane performance defaults.
+
+```bash
+# Build image and start the service (explicit daemon)
+DOCKER_HOST=unix:///var/run/docker.sock docker compose -f compose.yaml build --pull
+DOCKER_HOST=unix:///var/run/docker.sock docker compose -f compose.yaml up -d
+
+# Logs and status
+DOCKER_HOST=unix:///var/run/docker.sock docker compose -f compose.yaml logs -f opensentry
+DOCKER_HOST=unix:///var/run/docker.sock docker compose -f compose.yaml ps
+```
 
 #### Basic Docker Compose
 
@@ -732,6 +808,30 @@ Check actual bound port in logs:
    ```
 
 4. Use hardware acceleration if available (Raspberry Pi: enable V4L2 hardware encoding)
+
+5. Ensure TurboJPEG is enabled
+   - In containers: `libturbojpeg0` is installed by the Dockerfile; it should auto-enable.
+   - On host: install PyTurboJPEG and the native lib, then export the path if needed:
+     ```bash
+     uv add PyTurboJPEG
+     # Ubuntu 24.04
+     sudo apt-get install -y libturbojpeg libjpeg-turbo8 libjpeg-turbo8-dev
+     export TURBOJPEG=/lib/x86_64-linux-gnu/libturbojpeg.so.0
+     ```
+
+6. Cap CPU-heavy thread pools (inside Docker already set in compose)
+   ```bash
+   export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+   ```
+
+7. Keep Gunicorn workers to 1 for best efficiency with shared broadcasters
+   ```bash
+   export GUNICORN_WORKERS=1
+   ```
+
+8. Prefer the All Feeds page only when needed or reduce global FPS/quality via `/settings`
+
+9. If network constrained, reduce `JPEG_QUALITY` and `OUTPUT_MAX_WIDTH` in settings.
 
 ---
 
