@@ -35,6 +35,14 @@ def render_settings_page(
     oauth2_client_id: str = '',
     oauth2_client_secret: str = '',
     oauth2_scope: str = 'openid profile email offline_access',
+    # Camera/stream tuning
+    cam_width: int = 0,
+    cam_height: int = 0,
+    cam_fps: int = 15,
+    cam_mjpeg: bool = True,
+    out_max_width: int = 960,
+    jpeg_quality: int = 75,
+    raw_fps: int = 15,
 ) -> str:
     options_html = ''
     if names:
@@ -205,6 +213,40 @@ def render_settings_page(
             <form method=\"post\" action=\"/settings\"> 
                 <p><label><input type=\"checkbox\" name=\"select_all\" value=\"1\" {select_all_checked}> Detect all classes</label></p>
                 <fieldset>
+                    <legend>Camera &amp; Stream</legend>
+                    <div class=\"md-grid\">
+                        <label class=\"control\">
+                            <span class=\"control-title\">Camera width (px)</span>
+                            <input type=\"number\" name=\"cam_width\" min=\"0\" step=\"1\" value=\"{cam_width}\"> 
+                        </label>
+                        <label class=\"control\">
+                            <span class=\"control-title\">Camera height (px)</span>
+                            <input type=\"number\" name=\"cam_height\" min=\"0\" step=\"1\" value=\"{cam_height}\"> 
+                        </label>
+                        <label class=\"control\">
+                            <span class=\"control-title\">Camera FPS: <output id=\"cam_fps_out\">{cam_fps}</output></span>
+                            <input type=\"range\" name=\"cam_fps\" min=\"5\" max=\"60\" step=\"1\" value=\"{cam_fps}\" oninput=\"document.getElementById('cam_fps_out').textContent=this.value\">
+                        </label>
+                        <label class=\"control\">
+                            <span class=\"control-title\">MJPEG</span>
+                            <label><input type=\"checkbox\" name=\"cam_mjpeg\" { 'checked' if cam_mjpeg else '' }> Enable MJPEG</label>
+                        </label>
+                        <label class=\"control\">
+                            <span class=\"control-title\">JPEG quality: <output id=\"stream_jpeg_quality_out\">{jpeg_quality}</output></span>
+                            <input type=\"range\" name=\"stream_jpeg_quality\" min=\"30\" max=\"95\" step=\"1\" value=\"{jpeg_quality}\" oninput=\"document.getElementById('stream_jpeg_quality_out').textContent=this.value\">
+                        </label>
+                        <label class=\"control\">
+                            <span class=\"control-title\">Stream max width (px)</span>
+                            <input type=\"number\" name=\"stream_max_width\" min=\"320\" step=\"10\" value=\"{out_max_width}\"> 
+                        </label>
+                        <label class=\"control\">
+                            <span class=\"control-title\">Stream FPS: <output id=\"stream_raw_fps_out\">{raw_fps}</output></span>
+                            <input type=\"range\" name=\"stream_raw_fps\" min=\"5\" max=\"30\" step=\"1\" value=\"{raw_fps}\" oninput=\"document.getElementById('stream_raw_fps_out').textContent=this.value\">
+                        </label>
+                    </div>
+                    <p><small>Leave width/height 0 to use device defaults. Lower dimensions, quality, and FPS reduce CPU and latency.</small></p>
+                </fieldset>
+                <fieldset>
                     <legend>Select classes (if not detecting all):</legend>
                     <div class=\"options-grid\">{options_html}</div>
                 </fieldset>
@@ -291,6 +333,7 @@ def render_settings_page(
                 update();
             }}
             ['md_threshold','md_min_area','md_kernel','md_iterations','md_pad'].forEach(bind);
+            ['cam_fps','stream_jpeg_quality','stream_raw_fps'].forEach(bind);
 
             // OAuth2 settings toggle
             var authModeRadios = document.querySelectorAll('input[name="auth_mode"]');

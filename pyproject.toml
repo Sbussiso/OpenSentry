@@ -13,4 +13,5 @@ dependencies = [
     "gunicorn>=22.0.0",
     "gevent>=24.2.1",
     "requests>=2.31.0",
+    "pyturbojpeg>=1.8.2",
 ]

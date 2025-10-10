@@ -1,0 +1,35 @@
+# Exclude local virtualenvs and caches
+.venv/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.log
+*.tmp
+*.swp
+*.swo
+
+# VCS and editor files
+.git/
+.gitignore
+.gitmodules
+*.DS_Store
+
+# Test/pytest caches
+.pytest_cache/
+pytest_cache/
+.mypy_cache/
+.cache/
+
+# Build artifacts
+build/
+dist/
+node_modules/
+
+# Large/local data
+archives/
+datasets/
+
+# Docker
+.dockerignore

@@ -809,6 +809,7 @@ dependencies = [
     { name = "gevent" },
     { name = "gunicorn" },
     { name = "opencv-python" },
+    { name = "pyturbojpeg" },
     { name = "requests" },
     { name = "ultralytics" },
     { name = "zeroconf" },
@@ -821,6 +822,7 @@ requires-dist = [
     { name = "gevent", specifier = ">=24.2.1" },
     { name = "gunicorn", specifier = ">=22.0.0" },
     { name = "opencv-python", specifier = ">=4.12.0.88" },
+    { name = "pyturbojpeg", specifier = ">=1.8.2" },
     { name = "requests", specifier = ">=2.31.0" },
     { name = "ultralytics", specifier = ">=8.3.204" },
     { name = "zeroconf", specifier = ">=0.148.0" },
@@ -972,6 +974,15 @@ sdist = { url = "https://files.pythonhosted.org/packages/66/c0/0c8b6ad9f17a802ee
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl", hash = "sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427", size = 229892, upload-time = "2024-03-01T18:36:18.57Z" },
 ]
+
+[[package]]
+name = "pyturbojpeg"
+version = "1.8.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d2/e8/0cbd6e4f086a3b9261b2539ab5ddb1e3ba0c94d45b47832594d4b4607586/PyTurboJPEG-1.8.2.tar.gz", hash = "sha256:b7d9625bbb2121b923228fc70d0c2b010b386687501f5b50acec4501222e152b", size = 12694, upload-time = "2025-06-22T07:26:45.861Z" }
 
 [[package]]
 name = "pyyaml"

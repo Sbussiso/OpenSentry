@@ -19,12 +19,13 @@ import cv2
 from helpers.camera import CameraStream
 from helpers.yolo import get_yolo_model
 from helpers.faces import get_face_cascade
-from helpers.motion import create_motion_generator
 from helpers.settings_page import render_settings_page
 from helpers.index_page import render_index_page
 from helpers.all_feeds_page import render_all_feeds_page
 from helpers.theme import get_css, header_html
 from helpers.mdns import MdnsAdvertiser
+from helpers.encoders import init_jpeg_encoder, encode_jpeg_bgr
+from helpers.frame_hub import Broadcaster
 from helpers.face_dedup import (
     compute_phash as _compute_phash,
     hamming as _hamming,
@@ -59,6 +60,11 @@ logging.basicConfig(
     format='[%(asctime)s] %(levelname)s %(name)s: %(message)s'
 )
 logger = logging.getLogger('opensentry')
+# Initialize fast JPEG encoder (TurboJPEG if available; falls back to OpenCV)
+try:
+    init_jpeg_encoder(logger)
+except Exception:
+    pass
 
 # In-memory ring buffer for recent logs (download via /logs/download)
 class _RingBufferHandler(logging.Handler):
@@ -556,10 +562,86 @@ def logs_download():
         pass
     return resp
 
-# Stream output tuning
-OUTPUT_MAX_WIDTH = 960
-JPEG_QUALITY = 75
-RAW_TARGET_FPS = 15
+# Stream output tuning (env-tunable)
+OUTPUT_MAX_WIDTH = int(os.environ.get('OPENSENTRY_OUTPUT_MAX_WIDTH', '960'))
+JPEG_QUALITY = int(os.environ.get('OPENSENTRY_JPEG_QUALITY', '75'))
+RAW_TARGET_FPS = int(os.environ.get('OPENSENTRY_RAW_FPS', '15'))
+
+# Video/stream configurable defaults and live config
+VIDEO_DEFAULTS = {
+    'width': 0,
+    'height': 0,
+    'fps': 15,
+    'mjpeg': True,
+}
+STREAM_DEFAULTS = {
+    'max_width': OUTPUT_MAX_WIDTH,
+    'jpeg_quality': JPEG_QUALITY,
+    'raw_fps': RAW_TARGET_FPS,
+}
+video_config = dict(VIDEO_DEFAULTS)
+stream_config = dict(STREAM_DEFAULTS)
+
+def _apply_video_stream_settings():
+    """Apply current video/stream settings to runtime (env + globals) and refresh camera."""
+    global OUTPUT_MAX_WIDTH, JPEG_QUALITY, RAW_TARGET_FPS
+    # Apply stream settings
+    try:
+        OUTPUT_MAX_WIDTH = int(stream_config.get('max_width', OUTPUT_MAX_WIDTH))
+        JPEG_QUALITY = int(stream_config.get('jpeg_quality', JPEG_QUALITY))
+        RAW_TARGET_FPS = int(stream_config.get('raw_fps', RAW_TARGET_FPS))
+    except Exception:
+        pass
+    # Apply camera settings via env for helpers.camera
+    try:
+        w = int(video_config.get('width', 0) or 0)
+        h = int(video_config.get('height', 0) or 0)
+        f = int(video_config.get('fps', 0) or 0)
+        m = bool(video_config.get('mjpeg', True))
+        if w > 0:
+            os.environ['OPENSENTRY_CAMERA_WIDTH'] = str(w)
+        else:
+            os.environ.pop('OPENSENTRY_CAMERA_WIDTH', None)
+        if h > 0:
+            os.environ['OPENSENTRY_CAMERA_HEIGHT'] = str(h)
+        else:
+            os.environ.pop('OPENSENTRY_CAMERA_HEIGHT', None)
+        if f > 0:
+            os.environ['OPENSENTRY_CAMERA_FPS'] = str(f)
+        else:
+            os.environ.pop('OPENSENTRY_CAMERA_FPS', None)
+        os.environ['OPENSENTRY_CAMERA_MJPEG'] = '1' if m else '0'
+        # Update camera sleep interval and force reopen to apply
+        try:
+            if f > 0:
+                camera_stream._sleep = 1.0 / max(1, f)
+        except Exception:
+            pass
+        try:
+            if camera_stream.camera is not None:
+                camera_stream.camera.release()
+        except Exception:
+            pass
+        camera_stream.camera = None
+    except Exception:
+        pass
+
+# Object/face detection throttles (env-tunable)
+OBJECTS_ENABLED = os.environ.get('OPENSENTRY_OBJECTS_ENABLED', '1') in ('1', 'true', 'TRUE')
+try:
+    OBJECTS_FPS = int(os.environ.get('OPENSENTRY_OBJECTS_FPS', '2'))
+except Exception:
+    OBJECTS_FPS = 2
+try:
+    OBJECTS_IMGSZ = int(os.environ.get('OPENSENTRY_OBJECTS_IMGSZ', '480'))
+except Exception:
+    OBJECTS_IMGSZ = 480
+
+FACES_USE_FR = os.environ.get('OPENSENTRY_FACES_USE_FR', '1') in ('1', 'true', 'TRUE')
+try:
+    FACE_TARGET_W = int(os.environ.get('OPENSENTRY_FACE_TARGET_W', '640'))
+except Exception:
+    FACE_TARGET_W = 640
 
 # (YOLO is now handled in helpers.yolo; face_recognition is used via helpers.face_dedup)
 
@@ -622,8 +704,21 @@ if _cfg:
             # Load auth config if present
             if 'auth' in _cfg and isinstance(_cfg['auth'], dict):
                 auth_config.update(_cfg['auth'])
+            # Load video/stream config if present
+            try:
+                if 'video' in _cfg and isinstance(_cfg['video'], dict):
+                    video_config.update(_cfg['video'])
+                if 'stream' in _cfg and isinstance(_cfg['stream'], dict):
+                    stream_config.update(_cfg['stream'])
+            except Exception:
+                pass
             # read existing device_id if present
             DEVICE_ID = _cfg.get('device_id') if isinstance(_cfg, dict) else None
+        # Apply loaded video/stream settings (updates env and camera)
+        try:
+            _apply_video_stream_settings()
+        except Exception:
+            pass
     except Exception:
         DEVICE_ID = None
 
@@ -673,6 +768,11 @@ def _ensure_camera_started():
         _start_mdns_advertiser()
     except Exception:
         pass
+    # Start broadcasters/workers once
+    try:
+        _ensure_hubs_started()
+    except Exception:
+        pass
 
 # mDNS advertiser lifecycle
 def _start_mdns_advertiser():
@@ -699,6 +799,255 @@ def _start_mdns_advertiser():
     except Exception as e:
         logger.warning('mDNS advertise failed: %s', e)
 
+
+# ---------- Centralized streaming hubs and background workers ----------
+
+# Raw stream broadcaster (single encode shared by all clients)
+def _produce_raw_jpeg() -> bytes | None:
+    frame = camera_stream.get_frame()
+    if frame is None:
+        # Optional placeholder to make streams testable without a camera
+        if os.environ.get('OPENSENTRY_ALLOW_PLACEHOLDER', '0') in ('1', 'true', 'TRUE'):
+            import numpy as _np
+            f = _np.zeros((480, 640, 3), dtype=_np.uint8)
+            cv2.putText(f, 'NO CAMERA', (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+            return encode_jpeg_bgr(f, JPEG_QUALITY)
+        return None
+    # Downscale for output if needed
+    H, W = frame.shape[:2]
+    if W > OUTPUT_MAX_WIDTH:
+        scale = OUTPUT_MAX_WIDTH / float(W)
+        frame = cv2.resize(frame, (int(W * scale), int(H * scale)), interpolation=cv2.INTER_AREA)
+    return encode_jpeg_bgr(frame, JPEG_QUALITY)
+
+
+raw_broadcaster = Broadcaster(
+    name='raw',
+    produce_fn=_produce_raw_jpeg,
+    fps_getter=lambda: int(stream_config.get('raw_fps', RAW_TARGET_FPS)),
+)
+
+
+class _ObjectsWorker:
+    def __init__(self):
+        self._th = None
+        self._running = False
+        self._lock = threading.Lock()
+        self._latest: bytes | None = None
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._th = threading.Thread(target=self._run, name='ObjectsWorker', daemon=True)
+        self._th.start()
+
+    def stop(self):
+        self._running = False
+
+    def get_latest(self) -> bytes | None:
+        with self._lock:
+            return self._latest
+
+    def _run(self):
+        last_inf = 0.0
+        while self._running:
+            frame = camera_stream.get_frame()
+            if frame is None:
+                time.sleep(0.05)
+                continue
+            # Prepare base frame (downscale after overlay to preserve label clarity)
+            draw_frame = frame.copy()
+
+            if not OBJECTS_ENABLED:
+                cv2.putText(draw_frame, 'Objects disabled (OPENSENTRY_OBJECTS_ENABLED=1)', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            else:
+                model = get_yolo_model()
+                if model is None:
+                    cv2.putText(draw_frame, 'YOLOv8n unavailable. Install ultralytics', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                else:
+                    try:
+                        now_ts = time.time()
+                        min_int = 1.0 / max(1, int(OBJECTS_FPS or 1))
+                        if (now_ts - last_inf) >= min_int:
+                            results = model(draw_frame, imgsz=int(OBJECTS_IMGSZ), verbose=False)[0]
+                            last_inf = now_ts
+                        else:
+                            results = None
+                        names = getattr(results, 'names', {}) or getattr(model, 'names', {}) or {}
+                        if results is not None and hasattr(results, 'boxes') and results.boxes is not None:
+                            # Snapshot class filter settings
+                            with settings_lock:
+                                select_all = object_detection_config['select_all']
+                                allowed = set(object_detection_config['classes'])
+                            for b in results.boxes:
+                                try:
+                                    xyxy = b.xyxy[0].cpu().numpy().tolist()
+                                    x1, y1, x2, y2 = [int(v) for v in xyxy]
+                                    conf = float(b.conf[0]) if getattr(b, 'conf', None) is not None else 0.0
+                                    cls_id = int(b.cls[0]) if getattr(b, 'cls', None) is not None else -1
+                                    label = names.get(cls_id, str(cls_id if cls_id >= 0 else 'obj'))
+                                    if not select_all and label not in allowed:
+                                        continue
+                                    color = (0, 255, 255)
+                                    cv2.rectangle(draw_frame, (x1, y1), (x2, y2), color, 2)
+                                    text = f"{label} {conf:.2f}"
+                                    cv2.putText(draw_frame, text, (x1, max(20, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                                except Exception:
+                                    continue
+                    except Exception as e:
+                        cv2.putText(draw_frame, f'YOLO error: {e}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+            # Downscale for output if needed
+            H, W = draw_frame.shape[:2]
+            if W > OUTPUT_MAX_WIDTH:
+                scale = OUTPUT_MAX_WIDTH / float(W)
+                draw_frame = cv2.resize(draw_frame, (int(W * scale), int(H * scale)), interpolation=cv2.INTER_AREA)
+
+            jpg = encode_jpeg_bgr(draw_frame, JPEG_QUALITY)
+            with self._lock:
+                self._latest = jpg
+
+            # Maintain objects FPS pacing even if broadcaster polls faster
+            per = 1.0 / max(1, int(OBJECTS_FPS or 1))
+            time.sleep(per * 0.9)
+
+
+_objects_worker = _ObjectsWorker()
+
+objects_broadcaster = Broadcaster(
+    name='objects',
+    produce_fn=lambda: _objects_worker.get_latest(),
+    fps_getter=lambda: int(stream_config.get('raw_fps', RAW_TARGET_FPS)),
+)
+
+
+class _MotionWorker:
+    def __init__(self):
+        self._th = None
+        self._running = False
+        self._lock = threading.Lock()
+        self._latest: bytes | None = None
+        self._prev_small = None
+        self._proc_scale = 0.5
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._th = threading.Thread(target=self._run, name='MotionWorker', daemon=True)
+        self._th.start()
+
+    def stop(self):
+        self._running = False
+
+    def get_latest(self) -> bytes | None:
+        with self._lock:
+            return self._latest
+
+    def _run(self):
+        last_send = 0.0
+        while self._running:
+            frame = camera_stream.get_frame()
+            if frame is None:
+                time.sleep(0.05)
+                continue
+
+            # FPS cap for processing to avoid CPU spikes
+            now_ts = time.time()
+            target_fps = max(1, int(stream_config.get('raw_fps', RAW_TARGET_FPS)))
+            min_interval = 1.0 / float(target_fps)
+            if (now_ts - last_send) < min_interval:
+                time.sleep(max(0.0, min_interval - (now_ts - last_send)))
+            last_send = time.time()
+
+            # Downscale for motion processing
+            H, W = frame.shape[:2]
+            small = cv2.resize(frame, (int(W * self._proc_scale), int(H * self._proc_scale)), interpolation=cv2.INTER_AREA)
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            gray = cv2.GaussianBlur(gray, (21, 21), 0)
+
+            if self._prev_small is None:
+                self._prev_small = gray
+                continue
+
+            # Load settings snapshot
+            cfg = _get_motion_settings_snapshot()
+            m_thresh = int(cfg.get('threshold', 25))
+            m_kernel = int(cfg.get('kernel', 15))
+            m_iters = int(cfg.get('iterations', 2))
+            min_area = int(cfg.get('min_area', 500))
+            pad = int(cfg.get('pad', 10))
+
+            frame_delta = cv2.absdiff(self._prev_small, gray)
+            thresh = cv2.threshold(frame_delta, m_thresh, 255, cv2.THRESH_BINARY)[1]
+            ksize = max(1, m_kernel)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (ksize, ksize))
+            thresh = cv2.dilate(thresh, kernel, iterations=max(0, m_iters))
+
+            contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            motion_detected = False
+            x_min = y_min = x_max = y_max = None
+            for contour in contours:
+                if cv2.contourArea(contour) < min_area:
+                    continue
+                (x, y, w, h) = cv2.boundingRect(contour)
+                if x_min is None:
+                    x_min, y_min, x_max, y_max = x, y, x + w, y + h
+                    motion_detected = True
+                else:
+                    x_min = min(x_min, x)
+                    y_min = min(y_min, y)
+                    x_max = max(x_max, x + w)
+                    y_max = max(y_max, y + h)
+
+            draw_frame = frame
+            if motion_detected:
+                inv = 1.0 / self._proc_scale
+                x1 = int(max(0, x_min - pad) * inv)
+                y1 = int(max(0, y_min - pad) * inv)
+                x2 = int(min(small.shape[1] - 1, x_max + pad) * inv)
+                y2 = int(min(small.shape[0] - 1, y_max + pad) * inv)
+                cv2.rectangle(draw_frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
+            status = "MOTION DETECTED" if motion_detected else "No Motion"
+            color = (0, 0, 255) if motion_detected else (0, 255, 0)
+            cv2.putText(draw_frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+
+            self._prev_small = gray
+
+            # Downscale for output if needed and encode
+            H2, W2 = draw_frame.shape[:2]
+            if W2 > OUTPUT_MAX_WIDTH:
+                scale_out = OUTPUT_MAX_WIDTH / float(W2)
+                draw_frame = cv2.resize(draw_frame, (int(W2 * scale_out), int(H2 * scale_out)), interpolation=cv2.INTER_AREA)
+
+            jpg = encode_jpeg_bgr(draw_frame, JPEG_QUALITY)
+            with self._lock:
+                self._latest = jpg
+
+
+_motion_worker = _MotionWorker()
+
+motion_broadcaster = Broadcaster(
+    name='motion',
+    produce_fn=lambda: _motion_worker.get_latest(),
+    fps_getter=lambda: int(stream_config.get('raw_fps', RAW_TARGET_FPS)),
+)
+
+
+_hubs_started = False
+
+def _ensure_hubs_started():
+    global _hubs_started
+    if _hubs_started:
+        return
+    raw_broadcaster.start()
+    _objects_worker.start()
+    objects_broadcaster.start()
+    _motion_worker.start()
+    motion_broadcaster.start()
+    _hubs_started = True
 
 @app.after_request
 def _add_observability_headers(resp):
@@ -732,93 +1081,13 @@ def _find_available_port(start_port: int, attempts: int = 10) -> int:
 
 
 def generate_frames():
-    """Generator function that yields raw frames in MJPEG format"""
-    last_send = 0.0
-    while True:
-        frame = camera_stream.get_frame()
-        if frame is None:
-            # Optional placeholder to make streams testable without a camera
-            if os.environ.get('OPENSENTRY_ALLOW_PLACEHOLDER', '0') in ('1', 'true', 'TRUE'):
-                frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                cv2.putText(frame, 'NO CAMERA', (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
-            else:
-                time.sleep(0.1)
-                continue
-
-        # FPS limit
-        now_ts = time.time()
-        min_interval = 1.0 / max(1, RAW_TARGET_FPS)
-        dt = now_ts - last_send
-        if dt < min_interval:
-            time.sleep(max(0.0, min_interval - dt))
-        last_send = time.time()
-
-        # Downscale for output if needed
-        H, W = frame.shape[:2]
-        if W > OUTPUT_MAX_WIDTH:
-            scale = OUTPUT_MAX_WIDTH / float(W)
-            frame = cv2.resize(frame, (int(W * scale), int(H * scale)), interpolation=cv2.INTER_AREA)
-
-        # Encode frame as JPEG (lower quality to reduce CPU)
-        ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(JPEG_QUALITY)])
-        if not ret:
-            continue
-
-        frame_bytes = buffer.tobytes()
-
-        # Yield frame in multipart format
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n'
-               b'Content-Length: ' + str(len(frame_bytes)).encode() + b'\r\n\r\n' + frame_bytes + b'\r\n')
+    """Centralized raw stream shared across clients."""
+    return raw_broadcaster.multipart_stream()
 
 
 def generate_frames_with_objects():
-    """Generator function that yields frames with YOLOv8n object detection overlays."""
-    model = get_yolo_model()
-    while True:
-        frame = camera_stream.get_frame()
-        if frame is None:
-            time.sleep(0.1)
-            continue
-
-        # Snapshot settings to avoid holding the lock during inference
-        with settings_lock:
-            select_all = object_detection_config['select_all']
-            allowed = set(object_detection_config['classes'])
-
-        if model is None:
-            # Informative overlay if ultralytics isn't installed or model failed
-            msg = 'YOLOv8n unavailable. Install: uv add ultralytics'
-            cv2.putText(frame, msg, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        else:
-            try:
-                results = model(frame, verbose=False)[0]
-                names = getattr(results, 'names', {}) or getattr(model, 'names', {}) or {}
-                if hasattr(results, 'boxes') and results.boxes is not None:
-                    for b in results.boxes:
-                        # xyxy tensor -> ints
-                        xyxy = b.xyxy[0].cpu().numpy().tolist()
-                        x1, y1, x2, y2 = [int(v) for v in xyxy]
-                        conf = float(b.conf[0]) if getattr(b, 'conf', None) is not None else 0.0
-                        cls_id = int(b.cls[0]) if getattr(b, 'cls', None) is not None else -1
-                        label = names.get(cls_id, str(cls_id if cls_id >= 0 else 'obj'))
-                        if not select_all and label not in allowed:
-                            continue
-                        color = (0, 255, 255)
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                        text = f"{label} {conf:.2f}"
-                        cv2.putText(frame, text, (x1, max(20, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-            except Exception as e:
-                cv2.putText(frame, f'YOLO error: {e}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
-        # Encode and yield
-        ret, buffer = cv2.imencode('.jpg', frame)
-        if not ret:
-            continue
-        frame_bytes = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n'
-               b'Content-Length: ' + str(len(frame_bytes)).encode() + b'\r\n\r\n' + frame_bytes + b'\r\n')
+    """Centralized objects stream shared across clients (background inference)."""
+    return objects_broadcaster.multipart_stream()
 
 
 def generate_frames_with_faces():
@@ -860,13 +1129,13 @@ def generate_frames_with_faces():
             time.sleep(0.1)
             continue
 
-        # Prefer face_recognition detection (HOG) when available; fallback to Haar cascade
+        # Prefer face_recognition detection (HOG) when enabled and available; fallback to Haar cascade
         H, W = frame.shape[:2]
         valid = []
         used_detector = 'haar'
-        if face_recognition_available and face_recognition is not None:
+        if FACES_USE_FR and face_recognition_available and face_recognition is not None:
             try:
-                target_w = 800
+                target_w = int(FACE_TARGET_W)
                 scale = 1.0
                 if W > target_w:
                     scale = target_w / float(W)
@@ -1254,9 +1523,8 @@ def _get_motion_settings_snapshot():
 
 
 def generate_frames_with_detection():
-    """Generator function that yields frames with motion detection overlay (via helpers.motion)."""
-    gen = create_motion_generator(camera_stream, _get_motion_settings_snapshot)
-    return gen()
+    """Centralized motion stream shared across clients (background processing)."""
+    return motion_broadcaster.multipart_stream()
 
 @app.route('/archives/image')
 def archives_image():
@@ -1606,9 +1874,39 @@ def settings():
                     os.makedirs(face_detection_config['archive_dir'], exist_ok=True)
                 except Exception:
                     pass
-        # Persist config to disk after general update
+            # Camera & Stream settings from form
+            def _to_int2(val, default):
+                try:
+                    return int(val)
+                except Exception:
+                    return default
+            cam_width_in = request.form.get('cam_width')
+            cam_height_in = request.form.get('cam_height')
+            cam_fps_in = request.form.get('cam_fps')
+            cam_mjpeg_in = 'cam_mjpeg' in request.form
+            stream_jpeg_q_in = request.form.get('stream_jpeg_quality')
+            stream_max_w_in = request.form.get('stream_max_width')
+            stream_raw_fps_in = request.form.get('stream_raw_fps')
+            if cam_width_in is not None and cam_width_in != '':
+                video_config['width'] = max(0, _to_int2(cam_width_in, video_config.get('width', 0)))
+            if cam_height_in is not None and cam_height_in != '':
+                video_config['height'] = max(0, _to_int2(cam_height_in, video_config.get('height', 0)))
+            if cam_fps_in is not None and cam_fps_in != '':
+                video_config['fps'] = max(1, _to_int2(cam_fps_in, video_config.get('fps', 15)))
+            video_config['mjpeg'] = bool(cam_mjpeg_in)
+            if stream_jpeg_q_in is not None and stream_jpeg_q_in != '':
+                stream_config['jpeg_quality'] = max(30, min(95, _to_int2(stream_jpeg_q_in, stream_config.get('jpeg_quality', JPEG_QUALITY))))
+            if stream_max_w_in is not None and stream_max_w_in != '':
+                stream_config['max_width'] = max(320, _to_int2(stream_max_w_in, stream_config.get('max_width', OUTPUT_MAX_WIDTH)))
+            if stream_raw_fps_in is not None and stream_raw_fps_in != '':
+                stream_config['raw_fps'] = max(1, _to_int2(stream_raw_fps_in, stream_config.get('raw_fps', RAW_TARGET_FPS)))
+        # Apply live and persist config to disk after general update
         try:
-            _save_config(CONFIG_PATH, object_detection_config, motion_detection_config, face_detection_config)
+            _apply_video_stream_settings()
+        except Exception:
+            pass
+        try:
+            _save_config(CONFIG_PATH, object_detection_config, motion_detection_config, face_detection_config, video_config=video_config, stream_config=stream_config)
         except Exception:
             pass
         return redirect(url_for('settings'))
@@ -1685,6 +1983,13 @@ def settings():
         oauth2_client_id=str(auth_config.get('oauth2_client_id', '')),
         oauth2_client_secret=str(auth_config.get('oauth2_client_secret', '')),
         oauth2_scope=str(auth_config.get('oauth2_scope', 'openid profile email offline_access')),
+        cam_width=int(video_config.get('width', 0)),
+        cam_height=int(video_config.get('height', 0)),
+        cam_fps=int(video_config.get('fps', 15)),
+        cam_mjpeg=bool(video_config.get('mjpeg', True)),
+        out_max_width=int(stream_config.get('max_width', OUTPUT_MAX_WIDTH)),
+        jpeg_quality=int(stream_config.get('jpeg_quality', JPEG_QUALITY)),
+        raw_fps=int(stream_config.get('raw_fps', RAW_TARGET_FPS)),
     )
     return page_html
 

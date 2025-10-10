@@ -18,12 +18,30 @@ services:
       - OPENSENTRY_SECRET=please-change-me
       - OPENSENTRY_LOG_LEVEL=INFO
       - OPENSENTRY_PORT=${OPENSENTRY_PORT:-5000}
+      - GUNICORN_WORKERS=1
+      - GUNICORN_TIMEOUT=60
+      # Thread caps to reduce CPU contention inside container
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
+      # Camera hints for compatibility; adjust if needed
+      - OPENSENTRY_CAMERA_MJPEG=1
+      # - OPENSENTRY_CAMERA_WIDTH=640
+      # - OPENSENTRY_CAMERA_HEIGHT=480
+      # Use placeholder frames if no camera is available
+      # - OPENSENTRY_ALLOW_PLACEHOLDER=1
     volumes:
       - ./archives:/app/archives
+      - /dev:/dev
     devices:
       - /dev/video0:/dev/video0
     # - /dev/video1:/dev/video1
     group_add:
       - video
+    device_cgroup_rules:
+      - 'c 81:* rmw'
+    security_opt:
+      - seccomp:unconfined
     restart: unless-stopped
     # privileged: true            # only if needed for camera access (try without first)
