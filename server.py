@@ -9,23 +9,18 @@ import socket
 import json
 import io
 from collections import deque
-try:
-    import face_recognition  # type: ignore
-except Exception:
-    face_recognition = None  # type: ignore
-from flask import Flask, Response, request, redirect, url_for, send_file, abort, session, render_template_string, jsonify
+from flask import Flask, Response, request, redirect, url_for, send_file, send_from_directory, abort, session, render_template_string, jsonify
 from io import BytesIO
 import cv2
 from helpers.camera import CameraStream
-from helpers.yolo import get_yolo_model
+from helpers.yolo import get_yolo_model, get_coco_names
 from helpers.faces import get_face_cascade
 from helpers.settings_page import render_settings_page
 from helpers.index_page import render_index_page
 from helpers.all_feeds_page import render_all_feeds_page
 from helpers.theme import get_css, header_html
 from helpers.mdns import MdnsAdvertiser
-from helpers.encoders import init_jpeg_encoder, encode_jpeg_bgr
-from helpers.frame_hub import Broadcaster
+from helpers.gstreamer_hls import HLSStream
 from helpers.face_dedup import (
     compute_phash as _compute_phash,
     hamming as _hamming,
@@ -37,7 +32,7 @@ from helpers.face_dedup import (
     load_known_manifest as _load_known_manifest,
     append_known_manifest as _append_known_manifest,
     compute_embedding as _compute_embedding,
-    face_recognition_available,
+    is_face_recognition_available as _fr_available,
 )
 from helpers.config import load_config as _load_config, save_config as _save_config
 
@@ -51,6 +46,7 @@ MDNS_DISABLE = os.environ.get('OPENSENTRY_MDNS_DISABLE', '0') in ('1', 'true', '
 
 # mDNS state
 _mdns_adv = None
+_mdns_lock = threading.Lock()
 _startup_logged = False
 
 # Logging configuration
@@ -60,11 +56,17 @@ logging.basicConfig(
     format='[%(asctime)s] %(levelname)s %(name)s: %(message)s'
 )
 logger = logging.getLogger('opensentry')
-# Initialize fast JPEG encoder (TurboJPEG if available; falls back to OpenCV)
-try:
-    init_jpeg_encoder(logger)
-except Exception:
-    pass
+
+# Lazy face_recognition import helper (avoid heavy import at startup)
+face_recognition = None  # type: ignore
+def _maybe_import_face_recognition():
+    global face_recognition
+    if face_recognition is None:
+        try:
+            import face_recognition as _fr  # type: ignore
+            face_recognition = _fr  # type: ignore
+        except Exception:
+            face_recognition = None  # type: ignore
 
 # In-memory ring buffer for recent logs (download via /logs/download)
 class _RingBufferHandler(logging.Handler):
@@ -539,6 +541,102 @@ def status():
     }
     return (data, 200)
 
+
+# ---------- HLS static and player routes ----------
+@app.route('/hls/')
+def hls_index_redirect():
+    """Serve quad HLS index by default."""
+    try:
+        _ensure_hls_view_started('quad')
+    except Exception:
+        pass
+    idx = os.path.join(HLS_DIR, 'quad', 'index.m3u8')
+    if not os.path.exists(idx):
+        abort(404)
+    return send_from_directory(os.path.join(HLS_DIR, 'quad'), 'index.m3u8', mimetype='application/x-mpegURL', conditional=True)
+
+
+@app.route('/hls/<path:filename>')
+def hls_file(filename: str):
+    # filename may be like: raw/index.m3u8, quad/segment00001.ts, etc.
+    parts = (filename or '').split('/', 1)
+    view = parts[0] if parts else ''
+    if view in ('raw', 'motion', 'objects', 'faces', 'quad'):
+        try:
+            _ensure_hls_view_started(view)
+        except Exception:
+            pass
+    fp = os.path.join(HLS_DIR, filename)
+    if not os.path.exists(fp):
+        abort(404)
+    # Basic content type hints
+    if filename.endswith('.m3u8'):
+        mt = 'application/x-mpegURL'
+    elif filename.endswith('.ts'):
+        mt = 'video/MP2T'
+    else:
+        mt = None
+    return send_from_directory(HLS_DIR, filename, mimetype=mt, conditional=True)
+
+
+@app.route('/play_hls')
+def play_hls():
+    """Simple HLS player page using hls.js with Canvas overlay placeholder."""
+    try:
+        _ensure_hls_view_started('quad')
+    except Exception:
+        pass
+    html = f"""
+    <!DOCTYPE html>
+    <html lang=\"en\">
+    <head>
+      <meta charset=\"utf-8\"> 
+      <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"> 
+      <title>OpenSentry HLS</title>
+      <style>
+        :root {{ color-scheme: dark; }}
+        body {{ margin:0; background:#0b0e14; color:#eaeef2; font-family: system-ui, Arial, sans-serif; }}
+        header {{ padding:14px 18px; background:#11161f; border-bottom:1px solid #1c2431; }}
+        .wrap {{ max-width: 960px; margin: 0 auto; padding: 16px; }}
+        #container {{ position: relative; width: 100%; max-width: 960px; }}
+        #video {{ width: 100%; height: auto; background: #000; }}
+        #overlay {{ position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; }}
+        .muted {{ color:#93a3b5; font-size: 14px; }}
+      </style>
+      <script src=\"https://cdn.jsdelivr.net/npm/hls.js@latest\"></script>
+    </head>
+    <body>
+      <header><strong>OpenSentry</strong> — HLS Player</header>
+      <div class=\"wrap\">
+        <div id=\"container\"> 
+          <video id=\"video\" controls autoplay muted playsinline></video>
+          <canvas id=\"overlay\"></canvas>
+        </div>
+        <p class=\"muted\">If the video does not start, ensure your browser supports MSE/HLS or try Safari (native HLS).
+        HLS index: <a href=\"/hls/\" target=\"_blank\" rel=\"noopener\">/hls/index.m3u8</a></p>
+      </div>
+      <script>
+        const video = document.getElementById('video');
+        const overlay = document.getElementById('overlay');
+        function resizeCanvas() {{ overlay.width = video.clientWidth; overlay.height = video.clientHeight; }}
+        window.addEventListener('resize', resizeCanvas);
+        if (Hls.isSupported()) {{
+          const hls = new Hls({ lowLatencyMode: true, backBufferLength: 30 });
+          hls.loadSource('/hls/quad/index.m3u8');
+          hls.attachMedia(video);
+          hls.on(Hls.Events.MANIFEST_PARSED, function() {{ video.play(); resizeCanvas(); }});
+        }} else if (video.canPlayType('application/vnd.apple.mpegurl')) {{
+          video.src = '/hls/quad/index.m3u8';
+          video.addEventListener('loadedmetadata', function() {{ video.play(); resizeCanvas(); }});
+        }} else {{
+          document.body.insertAdjacentHTML('beforeend', '<p>HLS not supported in this browser.</p>');
+        }}
+      </script>
+    </body>
+    </html>
+    """
+    return (html, 200)
+
 @app.route('/logs/download')
 def logs_download():
     """Download recent server logs as a text file. Optional query param n=<lines>."""
@@ -581,6 +679,25 @@ STREAM_DEFAULTS = {
 }
 video_config = dict(VIDEO_DEFAULTS)
 stream_config = dict(STREAM_DEFAULTS)
+
+# HLS (GStreamer) configuration
+HLS_ENABLE = os.environ.get('OPENSENTRY_HLS_ENABLE', '1') in ('1', 'true', 'TRUE')
+try:
+    HLS_BITRATE_KBPS = int(os.environ.get('OPENSENTRY_HLS_BITRATE_KBPS', '2500'))
+except Exception:
+    HLS_BITRATE_KBPS = 2500
+HLS_DIR = os.path.join(BASE_DIR, os.environ.get('OPENSENTRY_HLS_DIR', 'hls'))
+try:
+    HLS_QUAD_WIDTH = int(os.environ.get('OPENSENTRY_HLS_QUAD_WIDTH', '1280'))
+except Exception:
+    HLS_QUAD_WIDTH = 1280
+
+# Separate HLS pipelines (per-view and quad)
+_hls_raw = None
+_hls_motion = None
+_hls_objects = None
+_hls_faces = None
+_hls_quad = None
 
 def _apply_video_stream_settings():
     """Apply current video/stream settings to runtime (env + globals) and refresh camera."""
@@ -642,6 +759,7 @@ try:
     FACE_TARGET_W = int(os.environ.get('OPENSENTRY_FACE_TARGET_W', '640'))
 except Exception:
     FACE_TARGET_W = 640
+FACES_EMBED_ENABLED = os.environ.get('OPENSENTRY_FACES_EMBED_ENABLED', '0') in ('1', 'true', 'TRUE')
 
 # (YOLO is now handled in helpers.yolo; face_recognition is used via helpers.face_dedup)
 
@@ -734,16 +852,34 @@ if not DEVICE_ID:
 # Global camera stream (class imported from helpers.camera)
 camera_stream = CameraStream()
 
+# GStreamer HLS stream handle
+_hls_stream = None
+
 # Ensure camera is released on shutdown
 def _on_shutdown():
+    global _hls_stream, _hls_raw, _hls_motion, _hls_objects, _hls_faces, _hls_quad, _mdns_adv
     try:
         if camera_stream and camera_stream.running:
             camera_stream.stop()
     except Exception:
         pass
+    # Stop HLS pipelines if running
+    try:
+        if _hls_stream is not None:
+            _hls_stream.stop()
+            _hls_stream = None
+        for ref_name in ['_hls_raw','_hls_motion','_hls_objects','_hls_faces','_hls_quad']:
+            try:
+                ref = globals().get(ref_name)
+                if ref is not None:
+                    ref.stop()
+                    globals()[ref_name] = None
+            except Exception:
+                pass
+    except Exception:
+        pass
     # Stop mDNS advertiser if running
     try:
-        global _mdns_adv
         if _mdns_adv is not None:
             _mdns_adv.stop()
             _mdns_adv = None
@@ -764,8 +900,15 @@ def _ensure_camera_started():
         except Exception:
             pass
         _startup_logged = True
+    # Start mDNS asynchronously to avoid blocking requests on slow networks
     try:
-        _start_mdns_advertiser()
+        if not MDNS_DISABLE and (_mdns_adv is None):
+            def _mdns_bg():
+                try:
+                    _start_mdns_advertiser()
+                except Exception:
+                    pass
+            threading.Thread(target=_mdns_bg, name='mDNS-Start', daemon=True).start()
     except Exception:
         pass
     # Start broadcasters/workers once
@@ -773,59 +916,36 @@ def _ensure_camera_started():
         _ensure_hubs_started()
     except Exception:
         pass
+    # Do not start HLS from request path; HLS will start lazily on first HLS endpoint access
 
 # mDNS advertiser lifecycle
 def _start_mdns_advertiser():
     global _mdns_adv
     if MDNS_DISABLE:
         return
-    if _mdns_adv is not None:
-        return
-    try:
-        txt = {
-            'id': DEVICE_ID,
-            'name': DEVICE_NAME,
-            'ver': APP_VERSION,
-            'caps': 'raw,motion,objects,faces',
-            'auth': 'token' if API_TOKEN else 'session',
-            'api': '/status,/health',
-            'path': '/',
-            'proto': '1',
-        }
-        adv = MdnsAdvertiser(DEVICE_NAME, APP_PORT, txt)
-        adv.start()
-        _mdns_adv = adv
-        logger.info('mDNS advertised _opensentry._tcp.local for %s on port %d', DEVICE_NAME, APP_PORT)
-    except Exception as e:
-        logger.warning('mDNS advertise failed: %s', e)
+    with _mdns_lock:
+        if _mdns_adv is not None:
+            return
+        try:
+            txt = {
+                'id': DEVICE_ID,
+                'name': DEVICE_NAME,
+                'ver': APP_VERSION,
+                'caps': 'raw,motion,objects,faces',
+                'auth': 'token' if API_TOKEN else 'session',
+                'api': '/status,/health',
+                'path': '/',
+                'proto': '1',
+            }
+            adv = MdnsAdvertiser(DEVICE_NAME, APP_PORT, txt)
+            adv.start()
+            _mdns_adv = adv
+            logger.info('mDNS advertised _opensentry._tcp.local for %s on port %d', DEVICE_NAME, APP_PORT)
+        except Exception as e:
+            logger.warning('mDNS advertise failed: %s', e)
 
 
-# ---------- Centralized streaming hubs and background workers ----------
-
-# Raw stream broadcaster (single encode shared by all clients)
-def _produce_raw_jpeg() -> bytes | None:
-    frame = camera_stream.get_frame()
-    if frame is None:
-        # Optional placeholder to make streams testable without a camera
-        if os.environ.get('OPENSENTRY_ALLOW_PLACEHOLDER', '0') in ('1', 'true', 'TRUE'):
-            import numpy as _np
-            f = _np.zeros((480, 640, 3), dtype=_np.uint8)
-            cv2.putText(f, 'NO CAMERA', (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
-            return encode_jpeg_bgr(f, JPEG_QUALITY)
-        return None
-    # Downscale for output if needed
-    H, W = frame.shape[:2]
-    if W > OUTPUT_MAX_WIDTH:
-        scale = OUTPUT_MAX_WIDTH / float(W)
-        frame = cv2.resize(frame, (int(W * scale), int(H * scale)), interpolation=cv2.INTER_AREA)
-    return encode_jpeg_bgr(frame, JPEG_QUALITY)
-
-
-raw_broadcaster = Broadcaster(
-    name='raw',
-    produce_fn=_produce_raw_jpeg,
-    fps_getter=lambda: int(stream_config.get('raw_fps', RAW_TARGET_FPS)),
-)
+# ---------- Background workers (no MJPEG broadcasters) ----------
 
 
 class _ObjectsWorker:
@@ -833,7 +953,7 @@ class _ObjectsWorker:
         self._th = None
         self._running = False
         self._lock = threading.Lock()
-        self._latest: bytes | None = None
+        self._latest_frame = None  # BGR ndarray
 
     def start(self):
         if self._running:
@@ -846,8 +966,12 @@ class _ObjectsWorker:
         self._running = False
 
     def get_latest(self) -> bytes | None:
+        # MJPEG disabled; keep for compatibility but return None
+        return None
+
+    def get_latest_frame(self):
         with self._lock:
-            return self._latest
+            return None if self._latest_frame is None else self._latest_frame.copy()
 
     def _run(self):
         last_inf = 0.0
@@ -904,9 +1028,8 @@ class _ObjectsWorker:
                 scale = OUTPUT_MAX_WIDTH / float(W)
                 draw_frame = cv2.resize(draw_frame, (int(W * scale), int(H * scale)), interpolation=cv2.INTER_AREA)
 
-            jpg = encode_jpeg_bgr(draw_frame, JPEG_QUALITY)
             with self._lock:
-                self._latest = jpg
+                self._latest_frame = draw_frame.copy()
 
             # Maintain objects FPS pacing even if broadcaster polls faster
             per = 1.0 / max(1, int(OBJECTS_FPS or 1))
@@ -914,12 +1037,7 @@ class _ObjectsWorker:
 
 
 _objects_worker = _ObjectsWorker()
-
-objects_broadcaster = Broadcaster(
-    name='objects',
-    produce_fn=lambda: _objects_worker.get_latest(),
-    fps_getter=lambda: int(stream_config.get('raw_fps', RAW_TARGET_FPS)),
-)
+objects_broadcaster = None  # MJPEG removed
 
 
 class _MotionWorker:
@@ -927,7 +1045,7 @@ class _MotionWorker:
         self._th = None
         self._running = False
         self._lock = threading.Lock()
-        self._latest: bytes | None = None
+        self._latest_frame = None  # BGR ndarray
         self._prev_small = None
         self._proc_scale = 0.5
 
@@ -942,8 +1060,12 @@ class _MotionWorker:
         self._running = False
 
     def get_latest(self) -> bytes | None:
+        # MJPEG disabled; keep for compatibility but return None
+        return None
+
+    def get_latest_frame(self):
         with self._lock:
-            return self._latest
+            return None if self._latest_frame is None else self._latest_frame.copy()
 
     def _run(self):
         last_send = 0.0
@@ -1016,24 +1138,18 @@ class _MotionWorker:
 
             self._prev_small = gray
 
-            # Downscale for output if needed and encode
+            # Downscale for output if needed and store latest frame
             H2, W2 = draw_frame.shape[:2]
             if W2 > OUTPUT_MAX_WIDTH:
                 scale_out = OUTPUT_MAX_WIDTH / float(W2)
                 draw_frame = cv2.resize(draw_frame, (int(W2 * scale_out), int(H2 * scale_out)), interpolation=cv2.INTER_AREA)
 
-            jpg = encode_jpeg_bgr(draw_frame, JPEG_QUALITY)
             with self._lock:
-                self._latest = jpg
+                self._latest_frame = draw_frame.copy()
 
 
 _motion_worker = _MotionWorker()
-
-motion_broadcaster = Broadcaster(
-    name='motion',
-    produce_fn=lambda: _motion_worker.get_latest(),
-    fps_getter=lambda: int(stream_config.get('raw_fps', RAW_TARGET_FPS)),
-)
+motion_broadcaster = None  # MJPEG removed
 
 
 _hubs_started = False
@@ -1042,12 +1158,304 @@ def _ensure_hubs_started():
     global _hubs_started
     if _hubs_started:
         return
-    raw_broadcaster.start()
-    _objects_worker.start()
-    objects_broadcaster.start()
-    _motion_worker.start()
-    motion_broadcaster.start()
+    # MJPEG broadcasters are deprecated; HLS pipelines start per-view lazily
     _hubs_started = True
+
+
+# Lazy starters for heavy workers
+_objects_started = False
+_motion_started = False
+_faces_started = False
+
+def _ensure_objects_started():
+    global _objects_started
+    if _objects_started:
+        return
+    try:
+        _objects_worker.start()
+    except Exception:
+        pass
+    _objects_started = True
+
+def _ensure_motion_started():
+    global _motion_started
+    if _motion_started:
+        return
+    try:
+        _motion_worker.start()
+    except Exception:
+        pass
+    _motion_started = True
+
+def _ensure_faces_started():
+    global _faces_started
+    if _faces_started:
+        return
+    try:
+        _face_worker.start()
+    except Exception:
+        pass
+    _faces_started = True
+
+
+# -------------- Face detection broadcaster (centralized) --------------
+class _FaceWorker:
+    def __init__(self):
+        self._thread = None
+        self._running = False
+        self._lock = threading.Lock()
+        self._latest_frame = None  # BGR ndarray
+
+    def start(self):
+        if self._thread is not None:
+            return
+        self._running = True
+        t = threading.Thread(target=self._run, name='FaceWorker', daemon=True)
+        t.start()
+        self._thread = t
+
+    def stop(self):
+        self._running = False
+
+    def get_latest(self) -> bytes | None:
+        # MJPEG disabled; keep for compatibility but return None
+        return None
+
+    def get_latest_frame(self):
+        with self._lock:
+            return None if self._latest_frame is None else self._latest_frame.copy()
+
+    def _run(self):
+        cascade = get_face_cascade()
+        while self._running:
+            frame = camera_stream.get_frame()
+            if frame is None:
+                time.sleep(0.05)
+                continue
+            draw = frame.copy()
+            H, W = draw.shape[:2]
+            color = (0, 200, 0)  # default FR color; will change for Haar
+            boxes = []
+
+            fr_ok = FACES_USE_FR and _fr_available()
+            if fr_ok:
+                _maybe_import_face_recognition()
+            if fr_ok and face_recognition is not None:
+                try:
+                    target_w = int(FACE_TARGET_W)
+                    scale = 1.0
+                    if W > target_w:
+                        scale = target_w / float(W)
+                        small = cv2.resize(draw, (int(W * scale), int(H * scale)), interpolation=cv2.INTER_LINEAR)
+                    else:
+                        small = draw
+                    small_rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+                    # HOG only (no landmarks to keep it fast)
+                    fr_boxes = face_recognition.face_locations(small_rgb, model='hog')  # (top, right, bottom, left)
+                    inv = 1.0 / scale
+                    for (top, right, bottom, left) in fr_boxes:
+                        x = int(left * inv)
+                        y = int(top * inv)
+                        w = int((right - left) * inv)
+                        h = int((bottom - top) * inv)
+                        if w > 0 and h > 0:
+                            boxes.append((x, y, w, h))
+                    color = (0, 200, 0)
+                except Exception:
+                    boxes = []
+
+            if not boxes:
+                # Fallback to Haar
+                if cascade is None:
+                    cv2.putText(draw, 'Face detector unavailable', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                else:
+                    try:
+                        gray = cv2.cvtColor(draw, cv2.COLOR_BGR2GRAY)
+                        gray = cv2.equalizeHist(gray)
+                        min_w = max(30, int(W * 0.09))
+                        min_h = max(30, int(H * 0.09))
+                        faces = cascade.detectMultiScale(
+                            gray,
+                            scaleFactor=1.22,
+                            minNeighbors=8,
+                            minSize=(min_w, min_h)
+                        )
+                        for (x, y, w, h) in faces:
+                            if w > 0 and h > 0:
+                                boxes.append((x, y, w, h))
+                        color = (255, 200, 0)
+                    except Exception:
+                        pass
+
+            for (x, y, w, h) in boxes:
+                cv2.rectangle(draw, (x, y), (x + w, y + h), color, 2)
+            cv2.putText(draw, f'Faces: {len(boxes)}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 200, 0), 2)
+
+            # Downscale for output if needed and encode
+            H2, W2 = draw.shape[:2]
+            if W2 > OUTPUT_MAX_WIDTH:
+                scale_out = OUTPUT_MAX_WIDTH / float(W2)
+                draw = cv2.resize(draw, (int(W2 * scale_out), int(H2 * scale_out)), interpolation=cv2.INTER_AREA)
+
+            with self._lock:
+                self._latest_frame = draw.copy()
+
+
+_face_worker = _FaceWorker()
+faces_broadcaster = None  # MJPEG removed
+
+
+# ---------- HLS (GStreamer) startup ----------
+def _ensure_hls_started():
+    global _hls_stream
+    if not HLS_ENABLE:
+        return
+    if _hls_stream is not None:
+        return
+    try:
+        os.makedirs(HLS_DIR, exist_ok=True)
+    except Exception:
+        pass
+    try:
+        fps = int(stream_config.get('raw_fps', RAW_TARGET_FPS))
+    except Exception:
+        fps = RAW_TARGET_FPS
+    try:
+        _hls_stream = HLSStream(camera_stream, HLS_DIR, fps=fps, bitrate_kbps=int(HLS_BITRATE_KBPS))
+        _hls_stream.start()
+        logger.info("Started HLS pipeline at /hls/index.m3u8 (fps=%d, bitrate_kbps=%d)", fps, int(HLS_BITRATE_KBPS))
+    except Exception as e:
+        _hls_stream = None
+        logger.warning("Failed to start HLS pipeline: %s", e)
+
+
+# ---------- HLS per-view frame providers ----------
+def _downscale_to_max_w(frame, max_w: int):
+    try:
+        H, W = frame.shape[:2]
+        if W > max_w:
+            s = max_w / float(W)
+            return cv2.resize(frame, (int(W * s), int(H * s)), interpolation=cv2.INTER_AREA)
+        return frame
+    except Exception:
+        return frame
+
+
+def _frame_raw():
+    f = camera_stream.get_frame()
+    if f is None:
+        return None
+    return _downscale_to_max_w(f, OUTPUT_MAX_WIDTH)
+
+
+def _frame_motion():
+    if not _motion_started:
+        _ensure_motion_started()
+    f = _motion_worker.get_latest_frame()
+    if f is None:
+        f = camera_stream.get_frame()
+    if f is None:
+        return None
+    return _downscale_to_max_w(f, OUTPUT_MAX_WIDTH)
+
+
+def _frame_objects():
+    if not _objects_started:
+        _ensure_objects_started()
+    f = _objects_worker.get_latest_frame()
+    if f is None:
+        f = camera_stream.get_frame()
+    if f is None:
+        return None
+    return _downscale_to_max_w(f, OUTPUT_MAX_WIDTH)
+
+
+def _frame_faces():
+    if not _faces_started:
+        _ensure_faces_started()
+    f = _face_worker.get_latest_frame()
+    if f is None:
+        f = camera_stream.get_frame()
+    if f is None:
+        return None
+    return _downscale_to_max_w(f, OUTPUT_MAX_WIDTH)
+
+
+def _frame_quad():
+    # Ensure workers so frames exist
+    if not _motion_started:
+        _ensure_motion_started()
+    if not _objects_started:
+        _ensure_objects_started()
+    if not _faces_started:
+        _ensure_faces_started()
+    fr = camera_stream.get_frame()
+    fm = _motion_worker.get_latest_frame() if _motion_worker else None
+    fo = _objects_worker.get_latest_frame() if _objects_worker else None
+    ff = _face_worker.get_latest_frame() if _face_worker else None
+    base = fr
+    # Fallbacks
+    if fm is None:
+        fm = fr
+    if fo is None:
+        fo = fr
+    if ff is None:
+        ff = fr
+    if base is None:
+        # No frames available yet
+        return None
+    try:
+        H, W = base.shape[:2]
+        tile_w = max(320, int(HLS_QUAD_WIDTH // 2))
+        tile_h = int(tile_w * (H / float(W)))
+        def _rz(img):
+            try:
+                return cv2.resize(img, (tile_w, tile_h), interpolation=cv2.INTER_AREA)
+            except Exception:
+                return img
+        tr = _rz(fr if fr is not None else base)
+        tm = _rz(fm if fm is not None else base)
+        to = _rz(fo if fo is not None else base)
+        tf = _rz(ff if ff is not None else base)
+        out_h = tile_h * 2
+        out_w = tile_w * 2
+        canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+        canvas[0:tile_h, 0:tile_w] = tr[:tile_h, :tile_w]
+        canvas[0:tile_h, tile_w:out_w] = tm[:tile_h, :tile_w]
+        canvas[tile_h:out_h, 0:tile_w] = to[:tile_h, :tile_w]
+        canvas[tile_h:out_h, tile_w:out_w] = tf[:tile_h, :tile_w]
+        return canvas
+    except Exception:
+        return base
+
+
+# ---------- Start specific HLS pipelines ----------
+def _ensure_hls_view_started(name: str):
+    global _hls_raw, _hls_motion, _hls_objects, _hls_faces, _hls_quad
+    try:
+        fps = int(stream_config.get('raw_fps', RAW_TARGET_FPS))
+    except Exception:
+        fps = RAW_TARGET_FPS
+    if name == 'raw':
+        if _hls_raw is None:
+            _hls_raw = HLSStream(camera_stream, os.path.join(HLS_DIR, 'raw'), fps=fps, bitrate_kbps=int(HLS_BITRATE_KBPS), frame_fn=_frame_raw)
+            _hls_raw.start()
+    elif name == 'motion':
+        if _hls_motion is None:
+            _hls_motion = HLSStream(camera_stream, os.path.join(HLS_DIR, 'motion'), fps=fps, bitrate_kbps=int(HLS_BITRATE_KBPS), frame_fn=_frame_motion)
+            _hls_motion.start()
+    elif name == 'objects':
+        if _hls_objects is None:
+            _hls_objects = HLSStream(camera_stream, os.path.join(HLS_DIR, 'objects'), fps=fps, bitrate_kbps=int(HLS_BITRATE_KBPS), frame_fn=_frame_objects)
+            _hls_objects.start()
+    elif name == 'faces':
+        if _hls_faces is None:
+            _hls_faces = HLSStream(camera_stream, os.path.join(HLS_DIR, 'faces'), fps=fps, bitrate_kbps=int(HLS_BITRATE_KBPS), frame_fn=_frame_faces)
+            _hls_faces.start()
+    elif name == 'quad':
+        if _hls_quad is None:
+            _hls_quad = HLSStream(camera_stream, os.path.join(HLS_DIR, 'quad'), fps=fps, bitrate_kbps=int(HLS_BITRATE_KBPS), frame_fn=_frame_quad)
+            _hls_quad.start()
 
 @app.after_request
 def _add_observability_headers(resp):
@@ -1081,18 +1489,18 @@ def _find_available_port(start_port: int, attempts: int = 10) -> int:
 
 
 def generate_frames():
-    """Centralized raw stream shared across clients."""
-    return raw_broadcaster.multipart_stream()
+    """Deprecated: MJPEG removed in favor of HLS (GStreamer)."""
+    raise RuntimeError("MJPEG streaming removed; use HLS endpoints under /hls/")
 
 
 def generate_frames_with_objects():
-    """Centralized objects stream shared across clients (background inference)."""
-    return objects_broadcaster.multipart_stream()
+    """Deprecated: MJPEG removed in favor of HLS (GStreamer)."""
+    raise RuntimeError("MJPEG streaming removed; use HLS endpoints under /hls/")
 
 
 def generate_frames_with_faces():
-    """Generator function that yields frames with face detection (Haar cascade)."""
-    cascade = get_face_cascade()
+    """Deprecated: MJPEG removed in favor of HLS (GStreamer)."""
+    raise RuntimeError("MJPEG streaming removed; use HLS endpoints under /hls/")
     # Simple track state for persisting detections over time
     tracks = {}  # id -> {bbox:(x,y,w,h), start:float, last:float, archived:bool}
     next_id = 1
@@ -1133,7 +1541,10 @@ def generate_frames_with_faces():
         H, W = frame.shape[:2]
         valid = []
         used_detector = 'haar'
-        if FACES_USE_FR and face_recognition_available and face_recognition is not None:
+        fr_ok = FACES_USE_FR and _fr_available()
+        if fr_ok:
+            _maybe_import_face_recognition()
+        if fr_ok and face_recognition is not None:
             try:
                 target_w = int(FACE_TARGET_W)
                 scale = 1.0
@@ -1250,8 +1661,8 @@ def generate_frames_with_faces():
             if tracks[tid]['last'] < stale_cutoff:
                 del tracks[tid]
 
-        # Pre-pass: identify known faces so recognized tracks are not archived
-        if face_recognition_available:
+        # Pre-pass: identify known faces so recognized tracks are not archived (optional embedding path)
+        if FACES_EMBED_ENABLED and _fr_available():
             try:
                 k_entries = _load_known_manifest(KNOWN_EMBED_PATH)
             except Exception:
@@ -1320,6 +1731,9 @@ def generate_frames_with_faces():
                             manifest_path = str(face_detection_config.get('manifest_path', os.path.join(archive_dir, 'manifest.json')))
                             manifest_embed_path = str(face_detection_config.get('manifest_embed_path', os.path.join(archive_dir, 'manifest_embeddings.json')))
                             cooldown_min = int(face_detection_config.get('cooldown_minutes', 60))
+                        # If embeddings are disabled, fall back to pHash regardless of configured method
+                        if not FACES_EMBED_ENABLED and method == 'embedding':
+                            method = 'phash'
                         is_dup = False
                         used_method = None
                         skip_save = False
@@ -1327,9 +1741,9 @@ def generate_frames_with_faces():
                         matched_uid = None
                         matched_name = None
 
-                        if dedup_enabled and method == 'embedding':
+                        if dedup_enabled and method == 'embedding' and FACES_EMBED_ENABLED:
                             used_method = 'embedding'
-                            if not face_recognition_available:
+                            if not _fr_available():
                                 # Embedding pipeline not available; skip saves for embedding method
                                 skip_save = True
                             else:
@@ -1421,8 +1835,8 @@ def generate_frames_with_faces():
                             # Failed to write image; abort archiving
                             continue
                         try:
-                            if method == 'embedding':
-                                if not face_recognition_available:
+                            if method == 'embedding' and FACES_EMBED_ENABLED:
+                                if not _fr_available():
                                     raise Exception('Embedding not available')
                                 if emb_vec is None:
                                     emb_vec = _compute_embedding(crop)
@@ -1446,8 +1860,8 @@ def generate_frames_with_faces():
                             logger.info(f"Archived face snapshot: {out_path}")
                             t['archived'] = True
 
-        # Live known-face identification (per frame): match tracks to known manifest
-        if face_recognition_available:
+        # Live known-face identification (per frame): match tracks to known manifest (optional embedding path)
+        if FACES_EMBED_ENABLED and _fr_available():
             try:
                 k_entries = _load_known_manifest(KNOWN_EMBED_PATH)
             except Exception:
@@ -1523,8 +1937,8 @@ def _get_motion_settings_snapshot():
 
 
 def generate_frames_with_detection():
-    """Centralized motion stream shared across clients (background processing)."""
-    return motion_broadcaster.multipart_stream()
+    """Deprecated: MJPEG removed in favor of HLS (GStreamer)."""
+    raise RuntimeError("MJPEG streaming removed; use HLS endpoints under /hls/")
 
 @app.route('/archives/image')
 def archives_image():
@@ -1651,17 +2065,10 @@ def all_feeds():
 
 @app.route('/settings', methods=['GET', 'POST'])
 def settings():
-    """Simple settings page to select YOLO classes (or All)."""
-    # Resolve available class names without running inference if possible
-    names = []
-    model = get_yolo_model()
+    """Settings page. Avoid heavy imports; use static COCO names by default."""
+    # Provide standard COCO names without importing Ultralytics
     try:
-        if model is not None:
-            raw_names = getattr(model, 'names', None)
-            if isinstance(raw_names, dict):
-                names = [raw_names[i] for i in sorted(raw_names.keys())]
-            elif isinstance(raw_names, (list, tuple)):
-                names = list(raw_names)
+        names = list(get_coco_names())
     except Exception:
         names = []
 
@@ -1944,11 +2351,12 @@ def settings():
             'img_url': url_for('archives_image') + f"?path={p}" if p else ''
         })
 
-    # Snapshot simple route health/status
+    # Snapshot simple route health/status (avoid heavy checks/imports)
     has_frame = (camera_stream.get_frame() is not None)
     raw_ok = camera_stream.running and has_frame
     motion_ok = raw_ok  # motion depends on camera frames
-    objects_ok = (model is not None) and raw_ok
+    # Don't import Ultralytics just to render settings; advertise capability
+    objects_ok = True and raw_ok
     faces_ok = (get_face_cascade() is not None) and raw_ok
 
     page_html = render_settings_page(
@@ -1972,7 +2380,7 @@ def settings():
         motion_ok=motion_ok,
         objects_ok=objects_ok,
         faces_ok=faces_ok,
-        face_recognition_available=face_recognition_available,
+        face_recognition_available=_fr_available(),
         unknowns=unknowns_for_ui,
         device_id=str(DEVICE_ID or ''),
         port=int(APP_PORT),
@@ -2011,50 +2419,22 @@ def api_oauth2_test():
 
 @app.route('/video_feed')
 def video_feed():
-    """Video streaming route - raw feed with no processing"""
-    resp = Response(generate_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
-    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0, no-transform'
-    resp.headers['Pragma'] = 'no-cache'
-    resp.headers['Expires'] = '0'
-    resp.headers['X-Accel-Buffering'] = 'no'
-    return resp
+    abort(404)
 
 
 @app.route('/video_feed_objects')
 def video_feed_objects():
-    """Video streaming route - YOLOv8n object detection overlay"""
-    resp = Response(generate_frames_with_objects(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
-    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0, no-transform'
-    resp.headers['Pragma'] = 'no-cache'
-    resp.headers['Expires'] = '0'
-    resp.headers['X-Accel-Buffering'] = 'no'
-    return resp
+    abort(404)
 
 @app.route('/video_feed_faces')
 def video_feed_faces():
-    """Video streaming route - face detection overlay (Haar)."""
-    resp = Response(generate_frames_with_faces(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
-    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0, no-transform'
-    resp.headers['Pragma'] = 'no-cache'
-    resp.headers['Expires'] = '0'
-    resp.headers['X-Accel-Buffering'] = 'no'
-    return resp
+    abort(404)
 
 
 
 @app.route('/video_feed_motion')
 def video_feed_motion():
-    """Video streaming route - motion detection overlay (alias)"""
-    resp = Response(generate_frames_with_detection(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
-    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0, no-transform'
-    resp.headers['Pragma'] = 'no-cache'
-    resp.headers['Expires'] = '0'
-    resp.headers['X-Accel-Buffering'] = 'no'
-    return resp
+    abort(404)
 
 
 def main():
@@ -2072,7 +2452,7 @@ def main():
     APP_PORT = chosen
     logger.info("Binding HTTP server on port %d (preferred %d)", chosen, preferred)
     logger.info("Device ID: %s, Version: %s, mDNS: %s", str(DEVICE_ID), str(APP_VERSION), 'ENABLED' if not MDNS_DISABLE else 'DISABLED')
-    logger.info("Access the feed at http://0.0.0.0:%d/video_feed", chosen)
+    logger.info("Access the HLS player at http://0.0.0.0:%d/play_hls", chosen)
     # Start mDNS advertisement after selecting the port
     try:
         _start_mdns_advertiser()

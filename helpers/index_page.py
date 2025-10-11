@@ -26,24 +26,28 @@ def render_index_page() -> str:
         {hdr}
         <div class=\"wrap\"> 
             <div class=\"card\"> 
-                <h1>Streams</h1>
-                <p class=\"lead\">Open a stream in a new tab.</p>
+                <h1>Streams (HLS)</h1>
+                <p class=\"lead\">Open an HLS stream in a new tab.</p>
                 <div class=\"grid\"> 
                     <div class=\"tile\"> 
-                        <h3>Raw Feed</h3>
-                        <div class=\"btns\"><a href=\"/video_feed\" target=\"_blank\" rel=\"noopener\">Open</a></div>
+                        <h3>Quad View</h3>
+                        <div class=\"btns\"><a href=\"/play_hls\" target=\"_blank\" rel=\"noopener\">Open</a></div>
                     </div>
                     <div class=\"tile\"> 
-                        <h3>Motion Detection</h3>
-                        <div class=\"btns\"><a href=\"/video_feed_motion\" target=\"_blank\" rel=\"noopener\">Open</a></div>
+                        <h3>Raw (HLS)</h3>
+                        <div class=\"btns\"><a href=\"/hls/raw/index.m3u8\" target=\"_blank\" rel=\"noopener\">Open</a></div>
                     </div>
                     <div class=\"tile\"> 
-                        <h3>Object Detection</h3>
-                        <div class=\"btns\"><a href=\"/video_feed_objects\" target=\"_blank\" rel=\"noopener\">Open</a></div>
+                        <h3>Motion (HLS)</h3>
+                        <div class=\"btns\"><a href=\"/hls/motion/index.m3u8\" target=\"_blank\" rel=\"noopener\">Open</a></div>
                     </div>
                     <div class=\"tile\"> 
-                        <h3>Face Detection</h3>
-                        <div class=\"btns\"><a href=\"/video_feed_faces\" target=\"_blank\" rel=\"noopener\">Open</a></div>
+                        <h3>Objects (HLS)</h3>
+                        <div class=\"btns\"><a href=\"/hls/objects/index.m3u8\" target=\"_blank\" rel=\"noopener\">Open</a></div>
+                    </div>
+                    <div class=\"tile\"> 
+                        <h3>Faces (HLS)</h3>
+                        <div class=\"btns\"><a href=\"/hls/faces/index.m3u8\" target=\"_blank\" rel=\"noopener\">Open</a></div>
                     </div>
                 </div>
                 <div style=\"margin-top:12px;\"><a class=\"secondary btns a\" href=\"/all_feeds\">View 2x2 Grid</a></div>

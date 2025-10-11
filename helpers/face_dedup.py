@@ -6,12 +6,28 @@ from typing import List, Dict, Any, Optional
 import cv2
 import numpy as np
 
-try:
-    import face_recognition  # type: ignore
-    face_recognition_available = True
-except Exception:  # pragma: no cover - optional dep
-    face_recognition = None  # type: ignore
-    face_recognition_available = False
+# Lazy import face_recognition to avoid heavy import at startup
+_fr_mod = None
+_fr_lock = threading.Lock()
+
+
+def _get_fr():
+    global _fr_mod
+    if _fr_mod is not None:
+        return _fr_mod
+    with _fr_lock:
+        if _fr_mod is not None:
+            return _fr_mod
+        try:
+            import face_recognition as _fr  # type: ignore
+            _fr_mod = _fr
+        except Exception:
+            _fr_mod = None
+        return _fr_mod
+
+
+def is_face_recognition_available() -> bool:
+    return _get_fr() is not None
 
 _manifest_lock = threading.Lock()
 
@@ -98,7 +114,8 @@ def append_embed_manifest(path: str, entry: Dict[str, Any]) -> None:
 
 
 def compute_embedding(img_bgr) -> Optional[np.ndarray]:
-    if face_recognition is None:
+    fr = _get_fr()
+    if fr is None:
         return None
     try:
         rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
@@ -106,7 +123,7 @@ def compute_embedding(img_bgr) -> Optional[np.ndarray]:
         encs = []
         # Try assuming the crop is the face (full crop bbox)
         try:
-            encs = face_recognition.face_encodings(
+            encs = fr.face_encodings(
                 rgb,
                 known_face_locations=[(0, w, h, 0)],  # top, right, bottom, left
                 model='small',
@@ -116,11 +133,11 @@ def compute_embedding(img_bgr) -> Optional[np.ndarray]:
             encs = []
         # If that fails, let face_recognition detect inside the crop
         if not encs:
-            encs = face_recognition.face_encodings(rgb, model='small', num_jitters=1)
+            encs = fr.face_encodings(rgb, model='small', num_jitters=1)
         # Last resort: try the larger model for better recall
         if not encs:
             try:
-                encs = face_recognition.face_encodings(
+                encs = fr.face_encodings(
                     rgb,
                     known_face_locations=[(0, w, h, 0)],
                     model='large',
@@ -129,7 +146,7 @@ def compute_embedding(img_bgr) -> Optional[np.ndarray]:
             except Exception:
                 encs = []
         if not encs:
-            encs = face_recognition.face_encodings(rgb, model='large', num_jitters=1)
+            encs = fr.face_encodings(rgb, model='large', num_jitters=1)
         if not encs:
             return None
         return np.asarray(encs[0], dtype=np.float32)

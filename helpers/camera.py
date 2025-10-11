@@ -32,13 +32,7 @@ class CameraStream:
     def start(self) -> None:
         if self.running:
             return
-        # Ensure camera is opened before starting the capture thread
-        self._open_camera()
-        if self.camera is None:
-            try:
-                logger.warning('No camera available after initial probe. Will keep retrying in background.')
-            except Exception:
-                pass
+        # Start capture thread; camera will be opened asynchronously by the loop
         self.running = True
         threading.Thread(target=self._capture_frames, daemon=True).start()
 

@@ -67,7 +67,7 @@ uv run server.py
 DOCKER_HOST=unix:///var/run/docker.sock docker compose -f compose.yaml build --pull
 DOCKER_HOST=unix:///var/run/docker.sock docker compose -f compose.yaml up -d
 
-# Tail logs (look for "TurboJPEG enabled for JPEG encoding")
+# Tail logs
 DOCKER_HOST=unix:///var/run/docker.sock docker compose -f compose.yaml logs -f opensentry
 
 # Access at http://127.0.0.1:5000
@@ -85,19 +85,15 @@ That's it! OpenSentry is now streaming from your camera.
 OpenSentry is designed for low CPU usage while supporting multiple simultaneous viewers.
 
 - **`server.py`**: App entrypoint. Defines routes, lifecycle, and starts background services.
-- **`helpers/camera.py`**: `CameraStream` captures frames from V4L2 (`/dev/video*`) with low-latency settings.
-- **`helpers/frame_hub.py`**: `Broadcaster` centralizes encoding and fan-out:
-  - Single producer function (`produce_fn`) encodes one JPEG per tick.
-  - Single-slot latest-frame buffer drops backlog to keep latency low.
-  - `multipart_stream()` yields an MJPEG stream shared by all clients (no per-client encoding).
-- **`helpers/encoders.py`**: Uses TurboJPEG when available, otherwise OpenCV JPEG.
+- **`helpers/camera.py`**: `CameraStream` captures frames from V4L2 (`/dev/video*`).
+- **`helpers/gstreamer_hls.py`**: HLS pipelines built with GStreamer. Accepts a `frame_fn` provider and streams frames via `appsrc` → H.264 encoder → HLS.
 - **Background workers (in `server.py`)**:
-  - `_ObjectsWorker` runs YOLOv8 at a capped FPS, overlays boxes, and publishes to `objects_broadcaster`.
-  - `_MotionWorker` detects motion on downscaled frames, draws ROI, and publishes to `motion_broadcaster`.
-  - Raw stream uses a lightweight producer to encode frames for `raw_broadcaster`.
-  - Faces stream currently renders per-request; can be centralized similarly (FaceWorker + broadcaster).
+  - `_ObjectsWorker` runs YOLO at a capped FPS and overlays boxes onto frames.
+  - `_MotionWorker` detects motion on downscaled frames and draws ROI.
+  - `_FaceWorker` draws Haar/FR detections (optional embedding/dedup pipeline kept for archives).
+  - A quad composer builds a 2×2 view (raw, motion, objects, faces) and feeds a single HLS pipeline.
 - **Discovery**: `helpers/mdns.py` advertises `_opensentry._tcp.local` for LAN discovery.
-- **Deployment**: `Dockerfile` + `compose.yaml` run Gunicorn (gevent) with `GUNICORN_WORKERS=1` for shared in-process broadcasters.
+- **Deployment**: `Dockerfile` + `compose.yaml` run Gunicorn with a single worker for shared in-process state.
 
 ### Data flow
 
@@ -105,31 +101,34 @@ OpenSentry is designed for low CPU usage while supporting multiple simultaneous 
 graph TD
   A[Camera /dev/video0] -->|BGR frames| B[CameraStream]
 
-  B --> C1[Raw Producer]
-  C1 --> D1[raw_broadcaster]
-  D1 --> E1[Clients /video_feed]
-
   B --> C2[_MotionWorker]
-  C2 --> D2[motion_broadcaster]
-  D2 --> E2[Clients /video_feed_motion]
-
   B --> C3[_ObjectsWorker]
-  C3 --> D3[objects_broadcaster]
-  D3 --> E3[Clients /video_feed_objects]
+  B --> C4[_FaceWorker]
 
-  subgraph Encoding
-    X[helpers/encoders.py] -->|TurboJPEG or OpenCV| D1
-    X --> D2
-    X --> D3
+  C2 --> Q[Quad Composer]
+  C3 --> Q
+  C4 --> Q
+  B  --> Q
+
+  subgraph Streaming (GStreamer)
+    Q --> H1[HLS Quad]
+    B --> H2[HLS Raw]
+    C2 --> H3[HLS Motion]
+    C3 --> H4[HLS Objects]
+    C4 --> H5[HLS Faces]
   end
+
+  H1 --> U1[Clients /play_hls or /hls/quad/index.m3u8]
+  H2 --> U2[Clients /hls/raw/index.m3u8]
+  H3 --> U3[Clients /hls/motion/index.m3u8]
+  H4 --> U4[Clients /hls/objects/index.m3u8]
+  H5 --> U5[Clients /hls/faces/index.m3u8]
 ```
 
 ### Concurrency & performance
 
-- **Single encode per tick** per stream type (raw/motion/objects), shared by all clients.
-- **Latest-frame only** buffer avoids growing queues and keeps latency low.
-- **FPS caps** for workers prevent CPU spikes; output width and JPEG quality configurable.
-- **TurboJPEG** accelerates JPEG encoding when the native lib is present.
+- **Single encode** per view via GStreamer (H.264), with inter-frame compression and optional hardware acceleration.
+- **Latest-frame only** overlays in workers avoid queues; FPS caps prevent CPU spikes.
 - Designed to support future optimizations (viewer-gated workers, motion-gated YOLO, ROI inference).
 
 ---
@@ -399,11 +398,13 @@ Or click **"Use local login for now"** on the OAuth2 unavailable page.
 | Endpoint | Description | Auth Required |
 |----------|-------------|---------------|
 | `/` | Dashboard | ✅ |
-| `/all_feeds` | 2x2 grid of all video streams | ✅ |
-| `/video_feed` | Raw camera feed (MJPEG) | ✅ |
-| `/video_feed_motion` | Motion detection overlay | ✅ |
-| `/video_feed_objects` | YOLO object detection | ✅ |
-| `/video_feed_faces` | Face detection overlay | ✅ |
+| `/all_feeds` | 2x2 grid (HLS tiles) | ✅ |
+| `/play_hls` | HLS quad player (2x2) | ✅ |
+| `/hls/` | HLS quad index.m3u8 | ✅ |
+| `/hls/raw/index.m3u8` | Raw feed (HLS) | ✅ |
+| `/hls/motion/index.m3u8` | Motion overlay (HLS) | ✅ |
+| `/hls/objects/index.m3u8` | Objects overlay (HLS) | ✅ |
+| `/hls/faces/index.m3u8` | Faces overlay (HLS) | ✅ |
 | `/settings` | Configuration page | ✅ |
 | `/archives/unknown_faces` | Face archive management | ✅ |
 | `/health` | Health check (200 OK) | ❌ |

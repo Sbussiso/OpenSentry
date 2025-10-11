@@ -41,30 +41,26 @@ def _login_session():
     return s
 
 
-def test_video_feed_stream_headers_and_chunk():
+def test_hls_quad_index_served():
     s = _login_session()
-    r = s.get(f"{BASE}/video_feed", stream=True, timeout=10)
+    r = s.get(f"{BASE}/hls/quad/index.m3u8", timeout=10)
     assert r.status_code == 200
     ct = r.headers.get("Content-Type", "")
-    assert ct.startswith("multipart/x-mixed-replace")
-    assert r.headers.get("X-Accel-Buffering") == "no"
-    # Custom headers present
+    assert "mpegurl" in ct.lower()
     assert "Server" in r.headers
-    # read one small chunk to verify stream emits data
-    chunk = next(r.iter_content(chunk_size=1024))
-    assert b"--frame" in chunk or b"Content-Type: image/jpeg" in chunk
-    r.close()
+    assert len(r.text) > 0
 
 
-def test_video_feed_motion_stream_headers_and_chunk():
+def test_hls_raw_index_served():
     s = _login_session()
-    r = s.get(f"{BASE}/video_feed_motion", stream=True, timeout=10)
+    r = s.get(f"{BASE}/hls/raw/index.m3u8", timeout=10)
+    # Allow 404 if raw hasn't started yet; touching /hls/raw will start it then index should appear soon
+    if r.status_code == 404:
+        # Trigger start by requesting the directory index via /hls/raw/index.m3u8 again after a short wait
+        time.sleep(1.0)
+        r = s.get(f"{BASE}/hls/raw/index.m3u8", timeout=10)
     assert r.status_code == 200
     ct = r.headers.get("Content-Type", "")
-    assert ct.startswith("multipart/x-mixed-replace")
-    assert r.headers.get("X-Accel-Buffering") == "no"
-    # Custom headers present
+    assert "mpegurl" in ct.lower()
     assert "Server" in r.headers
-    chunk = next(r.iter_content(chunk_size=1024))
-    assert b"--frame" in chunk or b"Content-Type: image/jpeg" in chunk
-    r.close()
+    assert len(r.text) > 0

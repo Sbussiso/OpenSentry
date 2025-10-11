@@ -20,11 +20,18 @@ services:
       - OPENSENTRY_PORT=${OPENSENTRY_PORT:-5000}
       - GUNICORN_WORKERS=1
       - GUNICORN_TIMEOUT=60
+      # Enable HLS via GStreamer
+      - OPENSENTRY_HLS_ENABLE=1
+      - OPENSENTRY_HLS_BITRATE_KBPS=2500
       # Thread caps to reduce CPU contention inside container
       - OMP_NUM_THREADS=1
       - OPENBLAS_NUM_THREADS=1
       - MKL_NUM_THREADS=1
       - NUMEXPR_NUM_THREADS=1
+      # Faces: prefer lightweight Haar on Pi; scale down face-recognition path if enabled
+      - OPENSENTRY_FACES_USE_FR=0
+      - OPENSENTRY_FACE_TARGET_W=320
+      - OPENSENTRY_FACES_EMBED_ENABLED=0
       # Camera hints for compatibility; adjust if needed
       - OPENSENTRY_CAMERA_MJPEG=1
       # - OPENSENTRY_CAMERA_WIDTH=640
@@ -34,6 +41,8 @@ services:
     volumes:
       - ./archives:/app/archives
       - /dev:/dev
+    tmpfs:
+      - /app/hls:rw,nosuid,nodev,noexec,size=128m
     devices:
       - /dev/video0:/dev/video0
     # - /dev/video1:/dev/video1

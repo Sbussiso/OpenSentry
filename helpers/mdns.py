@@ -18,9 +18,17 @@ def _get_local_ip() -> str:
     """
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # Short timeout to avoid blocking request thread if no network
+            s.settimeout(1.0)
+        except Exception:
+            pass
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
-        s.close()
+        try:
+            s.close()
+        except Exception:
+            pass
         return ip
     except Exception:
         try:
