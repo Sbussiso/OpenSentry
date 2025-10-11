@@ -551,6 +551,10 @@ def hls_index_redirect():
     except Exception:
         pass
     idx = os.path.join(HLS_DIR, 'quad', 'index.m3u8')
+    # Wait briefly for the first playlist to appear to avoid initial-race 404s
+    deadline = time.time() + 1.5
+    while not os.path.exists(idx) and time.time() < deadline:
+        time.sleep(0.1)
     if not os.path.exists(idx):
         abort(404)
     return send_from_directory(os.path.join(HLS_DIR, 'quad'), 'index.m3u8', mimetype='application/x-mpegURL', conditional=True)
@@ -567,6 +571,11 @@ def hls_file(filename: str):
         except Exception:
             pass
     fp = os.path.join(HLS_DIR, filename)
+    if not os.path.exists(fp):
+        # Wait briefly for first playlist/segment to be written
+        deadline = time.time() + 1.5
+        while not os.path.exists(fp) and time.time() < deadline:
+            time.sleep(0.1)
     if not os.path.exists(fp):
         abort(404)
     # Basic content type hints
@@ -2419,22 +2428,147 @@ def api_oauth2_test():
 
 @app.route('/video_feed')
 def video_feed():
-    abort(404)
+    # Serve minimal HLS player using the original endpoint path
+    try:
+        _ensure_hls_view_started('raw')
+    except Exception:
+        pass
+    html = """
+    <!DOCTYPE html>
+    <html lang=\"en\">
+    <head>
+      <meta charset=\"utf-8\">
+      <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+      <title>OpenSentry - Raw</title>
+      <script src=\"https://cdn.jsdelivr.net/npm/hls.js@latest\"></script>
+      <style>body{margin:0;background:#0b0e14;color:#eaeef2} video{width:100%;height:auto;background:#000}</style>
+    </head>
+    <body>
+      <video id=\"v\" controls autoplay muted playsinline></video>
+      <script>
+        const el = document.getElementById('v');
+        const src = '/hls/raw/index.m3u8';
+        if (window.Hls && window.Hls.isSupported()) {
+          const hls = new Hls({ lowLatencyMode: true, backBufferLength: 30 });
+          hls.loadSource(src);
+          hls.attachMedia(el);
+        } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
+          el.src = src;
+        }
+        el.play().catch(()=>{});
+      </script>
+    </body>
+    </html>
+    """
+    return (html, 200)
 
 
 @app.route('/video_feed_objects')
 def video_feed_objects():
-    abort(404)
+    try:
+        _ensure_hls_view_started('objects')
+    except Exception:
+        pass
+    html = """
+    <!DOCTYPE html>
+    <html lang=\"en\">
+    <head>
+      <meta charset=\"utf-8\">
+      <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+      <title>OpenSentry - Objects</title>
+      <script src=\"https://cdn.jsdelivr.net/npm/hls.js@latest\"></script>
+      <style>body{margin:0;background:#0b0e14;color:#eaeef2} video{width:100%;height:auto;background:#000}</style>
+    </head>
+    <body>
+      <video id=\"v\" controls autoplay muted playsinline></video>
+      <script>
+        const el = document.getElementById('v');
+        const src = '/hls/objects/index.m3u8';
+        if (window.Hls && window.Hls.isSupported()) {
+          const hls = new Hls({ lowLatencyMode: true, backBufferLength: 30 });
+          hls.loadSource(src);
+          hls.attachMedia(el);
+        } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
+          el.src = src;
+        }
+        el.play().catch(()=>{});
+      </script>
+    </body>
+    </html>
+    """
+    return (html, 200)
 
 @app.route('/video_feed_faces')
 def video_feed_faces():
-    abort(404)
+    try:
+        _ensure_hls_view_started('faces')
+    except Exception:
+        pass
+    html = """
+    <!DOCTYPE html>
+    <html lang=\"en\">
+    <head>
+      <meta charset=\"utf-8\">
+      <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+      <title>OpenSentry - Faces</title>
+      <script src=\"https://cdn.jsdelivr.net/npm/hls.js@latest\"></script>
+      <style>body{margin:0;background:#0b0e14;color:#eaeef2} video{width:100%;height:auto;background:#000}</style>
+    </head>
+    <body>
+      <video id=\"v\" controls autoplay muted playsinline></video>
+      <script>
+        const el = document.getElementById('v');
+        const src = '/hls/faces/index.m3u8';
+        if (window.Hls && window.Hls.isSupported()) {
+          const hls = new Hls({ lowLatencyMode: true, backBufferLength: 30 });
+          hls.loadSource(src);
+          hls.attachMedia(el);
+        } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
+          el.src = src;
+        }
+        el.play().catch(()=>{});
+      </script>
+    </body>
+    </html>
+    """
+    return (html, 200)
 
 
 
 @app.route('/video_feed_motion')
 def video_feed_motion():
-    abort(404)
+    try:
+        _ensure_hls_view_started('motion')
+    except Exception:
+        pass
+    html = """
+    <!DOCTYPE html>
+    <html lang=\"en\">
+    <head>
+      <meta charset=\"utf-8\">
+      <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+      <title>OpenSentry - Motion</title>
+      <script src=\"https://cdn.jsdelivr.net/npm/hls.js@latest\"></script>
+      <style>body{margin:0;background:#0b0e14;color:#eaeef2} video{width:100%;height:auto;background:#000}</style>
+    </head>
+    <body>
+      <video id=\"v\" controls autoplay muted playsinline></video>
+      <script>
+        const el = document.getElementById('v');
+        const src = '/hls/motion/index.m3u8';
+        if (window.Hls && window.Hls.isSupported()) {
+          const hls = new Hls({ lowLatencyMode: true, backBufferLength: 30 });
+          hls.loadSource(src);
+          hls.attachMedia(el);
+        } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
+          el.src = src;
+        }
+        el.play().catch(()=>{});
+      </script>
+    </body>
+    </html>
+    """
+    return (html, 200)
 
 
 def main():

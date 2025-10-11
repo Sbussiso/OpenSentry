@@ -20,22 +20,20 @@ def render_all_feeds_page() -> str:
     <head>
       <meta charset=\"utf-8\"> 
       <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"> 
-      <title>OpenSentry - All Feeds (HLS)</title>
       <style>{css}</style>
       <script src=\"https://cdn.jsdelivr.net/npm/hls.js@latest\"></script>
     </head>
     <body>
       {hdr}
       <div class=\"toolbar\">
-        <a class=\"btn\" href=\"/play_hls\" target=\"_blank\" rel=\"noopener\">Open Quad HLS</a>
-        <span class=\"note\">Use the buttons below to start/stop individual HLS tiles.</span>
+        <span class=\"note\">Use the buttons below to start/stop individual tiles.</span>
       </div>
       <div class=\"grid\">
         <div class=\"tile\">
           <h3>Raw</h3>
           <div class=\"controls\"><button class=\"btn\" data-action=\"play\" data-id=\"raw\">Play</button><button class=\"btn secondary\" data-action=\"stop\" data-id=\"raw\">Stop</button></div>
           <video id=\"raw\" data-src=\"/hls/raw/index.m3u8\" muted playsinline></video>
-        </div>
+{{ ... }}
         <div class=\"tile\">
           <h3>Motion</h3>
           <div class=\"controls\"><button class=\"btn\" data-action=\"play\" data-id=\"motion\">Play</button><button class=\"btn secondary\" data-action=\"stop\" data-id=\"motion\">Stop</button></div>

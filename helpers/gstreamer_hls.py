@@ -41,12 +41,27 @@ class HLSStream:
         self._height: Optional[int] = None
         self._ts_ns = 0
 
-        # init GStreamer if present
+        # init GStreamer if present and pick HLS element (hlssink2 on newer distros)
+        self._hls_elem: Optional[str] = None
         if Gst is not None:
             try:
                 Gst.init(None)
             except Exception:
                 pass
+            try:
+                # Prefer hlssink2 when available; fallback to hlssink
+                if getattr(Gst, 'ElementFactory', None) is not None:
+                    if Gst.ElementFactory.find('hlssink2') is not None:
+                        self._hls_elem = 'hlssink2'
+                    elif Gst.ElementFactory.find('hlssink') is not None:
+                        self._hls_elem = 'hlssink'
+                # Last resort: assume hlssink if factory discovery failed
+                if self._hls_elem is None:
+                    self._hls_elem = 'hlssink'
+                print(f"[GStreamer] Using HLS element: {self._hls_elem}")
+            except Exception:
+                # default to hlssink; pipeline creation may still fail and we will no-op
+                self._hls_elem = 'hlssink'
 
     def start(self):
         if self._running:
@@ -98,11 +113,12 @@ class HLSStream:
         segment = os.path.join(self.out_dir, 'segment%05d.ts')
 
         # First try hardware encoder
+        hls = self._hls_elem or 'hlssink'
         common = (
             f"appsrc name=src is-live=true format=time do-timestamp=true block=true ! "
             f"videoconvert ! video/x-raw,format=NV12 ! "
             f"{self._hw_encoder()} ! h264parse ! mpegtsmux ! "
-            f"hlssink target-duration=1 max-files=5 playlist-location={playlist} location={segment}"
+            f"{hls} target-duration=1 max-files=5 playlist-location={playlist} location={segment}"
         )
         pipeline = None
         try:
@@ -115,7 +131,7 @@ class HLSStream:
                     "videoconvert ! video/x-raw,format=I420 ! "
                     f"x264enc tune=zerolatency speed-preset=ultrafast bitrate={self.bitrate_kbps} key-int-max={self.fps*2} ! "
                     "h264parse ! mpegtsmux ! "
-                    f"hlssink target-duration=1 max-files=5 playlist-location={playlist} location={segment}"
+                    f"{hls} target-duration=1 max-files=5 playlist-location={playlist} location={segment}"
                 )
                 pipeline = Gst.parse_launch(sw)
             except Exception:

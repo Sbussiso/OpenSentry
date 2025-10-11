@@ -15,42 +15,38 @@ def render_index_page() -> str:
     hdr = header_html("OpenSentry")
     return f"""
     <!DOCTYPE html>
-    <html lang=\"en\">
+    <html lang="en">
     <head>
-        <meta charset=\"utf-8\">
-        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>OpenSentry</title>
         <style>{css}</style>
     </head>
     <body>
         {hdr}
-        <div class=\"wrap\"> 
-            <div class=\"card\"> 
-                <h1>Streams (HLS)</h1>
-                <p class=\"lead\">Open an HLS stream in a new tab.</p>
-                <div class=\"grid\"> 
-                    <div class=\"tile\"> 
-                        <h3>Quad View</h3>
-                        <div class=\"btns\"><a href=\"/play_hls\" target=\"_blank\" rel=\"noopener\">Open</a></div>
+        <div class="wrap"> 
+            <div class="card"> 
+                <h1>Streams</h1>
+                <p class="lead">Open a stream in a new tab.</p>
+                <div class="grid"> 
+                    <div class="tile"> 
+                        <h3>Raw</h3>
+                        <div class="btns"><a href="/video_feed" target="_blank" rel="noopener">Open</a></div>
                     </div>
-                    <div class=\"tile\"> 
-                        <h3>Raw (HLS)</h3>
-                        <div class=\"btns\"><a href=\"/hls/raw/index.m3u8\" target=\"_blank\" rel=\"noopener\">Open</a></div>
+                    <div class="tile"> 
+                        <h3>Motion</h3>
+                        <div class="btns"><a href="/video_feed_motion" target="_blank" rel="noopener">Open</a></div>
                     </div>
-                    <div class=\"tile\"> 
-                        <h3>Motion (HLS)</h3>
-                        <div class=\"btns\"><a href=\"/hls/motion/index.m3u8\" target=\"_blank\" rel=\"noopener\">Open</a></div>
+                    <div class="tile"> 
+                        <h3>Objects</h3>
+                        <div class="btns"><a href="/video_feed_objects" target="_blank" rel="noopener">Open</a></div>
                     </div>
-                    <div class=\"tile\"> 
-                        <h3>Objects (HLS)</h3>
-                        <div class=\"btns\"><a href=\"/hls/objects/index.m3u8\" target=\"_blank\" rel=\"noopener\">Open</a></div>
-                    </div>
-                    <div class=\"tile\"> 
-                        <h3>Faces (HLS)</h3>
-                        <div class=\"btns\"><a href=\"/hls/faces/index.m3u8\" target=\"_blank\" rel=\"noopener\">Open</a></div>
+                    <div class="tile"> 
+                        <h3>Faces</h3>
+                        <div class="btns"><a href="/video_feed_faces" target="_blank" rel="noopener">Open</a></div>
                     </div>
                 </div>
-                <div style=\"margin-top:12px;\"><a class=\"secondary btns a\" href=\"/all_feeds\">View 2x2 Grid</a></div>
+                <div style="margin-top:12px;"><a class="secondary btns a" href="/all_feeds">View 2x2 Grid</a></div>
             </div>
         </div>
     </body>
