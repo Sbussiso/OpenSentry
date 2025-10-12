@@ -19,7 +19,8 @@ services:
       - OPENSENTRY_LOG_LEVEL=INFO
       - OPENSENTRY_PORT=${OPENSENTRY_PORT:-5000}
       - GUNICORN_WORKERS=1
-      - GUNICORN_TIMEOUT=60
+      - GUNICORN_TIMEOUT=120
+      - GUNICORN_WORKER_CLASS=sync
       # Thread caps to reduce CPU contention inside container
       - OMP_NUM_THREADS=1
       - OPENBLAS_NUM_THREADS=1

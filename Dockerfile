@@ -68,10 +68,13 @@ EXPOSE 5000
 # Defaults for runtime
 ENV OPENSENTRY_PORT=5000 \
     GUNICORN_WORKERS=2 \
-    GUNICORN_TIMEOUT=60
+    GUNICORN_TIMEOUT=60 \
+    OPENBLAS_NUM_THREADS=1 \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_CORETYPE=ARMV8
 
 # Ensure the uv base image ENTRYPOINT does not wrap our command
 ENTRYPOINT []
 
 # Run the app via uv (uses the pre-synced project environment; --frozen prevents resolution)
-CMD ["sh", "-c", "uv run --frozen -m gunicorn -w ${GUNICORN_WORKERS:-2} -k gevent --timeout ${GUNICORN_TIMEOUT:-60} --bind 0.0.0.0:${OPENSENTRY_PORT:-5000} server:app"]
+CMD ["sh", "-c", "uv run --frozen -m gunicorn -w ${GUNICORN_WORKERS:-2} -k ${GUNICORN_WORKER_CLASS:-gevent} --timeout ${GUNICORN_TIMEOUT:-60} --bind 0.0.0.0:${OPENSENTRY_PORT:-5000} server:app"]
