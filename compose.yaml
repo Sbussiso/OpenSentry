@@ -31,6 +31,9 @@ services:
       # - OPENSENTRY_CAMERA_HEIGHT=480
       # Use placeholder frames if no camera is available
       # - OPENSENTRY_ALLOW_PLACEHOLDER=1
+      # OpenCV thread configuration for ARM stability
+      - OPENCV_VIDEOIO_PRIORITY_LIST=V4L2
+      - OPENCV_VIDEOIO_DEBUG=1
     volumes:
       - /dev:/dev
     devices:
