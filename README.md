@@ -136,8 +136,13 @@ graph TD
 
 - Python 3.12+ (for source installation)
 - Linux with V4L2 camera support (e.g., `/dev/video0`)
-- 1GB RAM minimum (2GB+ recommended)
+- 1GB RAM minimum (2GB+ recommended for x86_64, 1GB sufficient for ARM/Pi)
 - Docker (optional, for containerized deployment)
+
+**Platform Support:**
+- ✅ x86_64 (Intel/AMD)
+- ✅ ARM64/aarch64 (Raspberry Pi 4/5, Jetson Nano)
+- ✅ ARMv7 (Raspberry Pi 3)
 
 ### Run from Source
 
@@ -160,16 +165,33 @@ Visit **http://127.0.0.1:5000** and log in with `admin/admin`.
 
 #### Using the included compose.yaml
 
-The repo includes a `compose.yaml` preconfigured to map `/dev/video0` and set sane performance defaults.
+The repo includes a `compose.yaml` preconfigured to map `/dev/video0` and set sane performance defaults. **Optimized for Raspberry Pi and ARM devices.**
 
 ```bash
-# Build image and start the service (explicit daemon)
-DOCKER_HOST=unix:///var/run/docker.sock docker compose -f compose.yaml build --pull
-DOCKER_HOST=unix:///var/run/docker.sock docker compose -f compose.yaml up -d
+# Build image and start the service
+docker compose build --no-cache
+docker compose up -d
 
 # Logs and status
-DOCKER_HOST=unix:///var/run/docker.sock docker compose -f compose.yaml logs -f opensentry
-DOCKER_HOST=unix:///var/run/docker.sock docker compose -f compose.yaml ps
+docker logs -f opensentry
+docker compose ps
+```
+
+**First-time setup on Raspberry Pi:**
+```bash
+# Clone the repo
+git clone https://github.com/yourusername/OpenSentry.git
+cd OpenSentry
+
+# Generate lockfile (uses opencv-python-headless for ARM stability)
+uv lock
+
+# Build and start
+docker compose build --no-cache
+docker compose up -d
+
+# Monitor logs (camera init takes 10-60s on Pi)
+docker logs -f opensentry
 ```
 
 #### Basic Docker Compose
@@ -340,6 +362,10 @@ Or click **"Use local login for now"** on the OAuth2 unavailable page.
 | `OPENSENTRY_API_TOKEN` | Bearer token for `/status` endpoint | _(none)_ |
 | `OPENSENTRY_MDNS_DISABLE` | Disable mDNS advertisement | `0` |
 | `OPENSENTRY_VERSION` | Version metadata for discovery | `0.1.0` |
+| `GUNICORN_WORKERS` | Number of Gunicorn workers (use 1 on ARM) | `2` |
+| `GUNICORN_WORKER_CLASS` | Worker type: `sync` (ARM) or `gevent` (x86) | `gevent` |
+| `GUNICORN_TIMEOUT` | Worker timeout in seconds | `60` |
+| `OPENCV_VIDEOIO_PRIORITY_LIST` | OpenCV video backend priority | `V4L2` |
 
 ### config.json Structure
 
@@ -611,6 +637,58 @@ See [Related Projects](#-related-projects) for more info.
 ---
 
 ## 🔧 Troubleshooting
+
+### Raspberry Pi / ARM Issues
+
+**Problem**: Workers crash with "code 139" (segmentation fault) on Raspberry Pi
+
+**Solution**: This is fixed in the latest version. If you're still experiencing crashes:
+
+1. **Ensure you have the latest changes**:
+   ```bash
+   git pull
+   rm uv.lock  # Force regeneration with opencv-python-headless
+   uv lock
+   docker compose build --no-cache
+   docker compose up
+   ```
+
+2. **Verify compose.yaml has ARM optimizations**:
+   ```yaml
+   environment:
+     - GUNICORN_WORKERS=1
+     - GUNICORN_WORKER_CLASS=sync  # Critical for ARM stability
+     - OPENBLAS_NUM_THREADS=1
+     - OPENCV_VIDEOIO_PRIORITY_LIST=V4L2
+   ```
+
+3. **Check that opencv-python-headless is being used**:
+   ```bash
+   docker exec opensentry pip list | grep opencv
+   # Should show: opencv-python-headless (not opencv-python)
+   ```
+
+**Root Cause**: `gevent` worker + `opencv-python` + OpenBLAS threading causes segfaults on ARM. The fix uses:
+- `opencv-python-headless` (more stable on ARM)
+- `sync` worker instead of `gevent`
+- Single-threaded OpenBLAS
+
+**Problem**: Camera initialization is slow on Raspberry Pi
+
+**Solution**: This is normal. The Pi's camera takes 10-60 seconds to initialize. Check logs:
+```bash
+docker logs -f opensentry
+# Wait for: "INFO opensentry.camera: Opened camera device=/dev/video0"
+```
+
+**Problem**: High CPU usage on Raspberry Pi
+
+**Solutions**:
+1. Reduce camera resolution in settings (640x480 recommended)
+2. Lower JPEG quality to 60-70%
+3. Disable object detection if not needed
+4. Ensure only 1 Gunicorn worker is used
+5. Use the lighter motion detection instead of YOLO when possible
 
 ### Camera Issues
 
