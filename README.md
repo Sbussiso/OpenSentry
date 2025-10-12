@@ -12,14 +12,13 @@ Self-hosted. Privacy-first. No cloud required.
 
 ## 🎯 What is OpenSentry?
 
-OpenSentry transforms any Linux device with a webcam into an intelligent security camera system. Stream live video, detect motion, identify objects with YOLO, and recognize faces—all processed locally on your hardware.
+OpenSentry transforms any Linux device with a webcam into an intelligent security camera system. Stream live video, detect motion, and identify objects with YOLO — all processed locally on your hardware.
 
 ### Key Features
 
-- 📹 **Live Video Streaming** - Multiple feed types (raw, motion, objects, faces)
+- 📹 **Live Video Streaming** - Multiple feed types (raw, motion, objects)
 - 🚶 **Motion Detection** - Configurable sensitivity and detection zones
 - 🎯 **Object Detection** - YOLO-powered real-time object recognition
-- 👤 **Face Detection** - Archive unknown faces for later identification
 - 🌐 **Web Interface** - Dark-themed, mobile-friendly dashboard
 - 🔐 **Flexible Authentication** - Local auth or integrate with OAuth2/OIDC providers
 - 🔍 **mDNS Discovery** - Auto-discover devices on your network
@@ -89,20 +88,17 @@ OpenSentry is designed for low CPU usage while supporting multiple simultaneous 
 - **`helpers/frame_hub.py`**: `Broadcaster` centralizes encoding and fan-out:
   - Single producer function (`produce_fn`) encodes one JPEG per tick.
   - Single-slot latest-frame buffer drops backlog to keep latency low.
-  - `multipart_stream()` yields an MJPEG stream shared by all clients (no per-client encoding).
 - **`helpers/encoders.py`**: Uses TurboJPEG when available, otherwise OpenCV JPEG.
 - **Background workers (in `server.py`)**:
   - `_ObjectsWorker` runs YOLOv8 at a capped FPS, overlays boxes, and publishes to `objects_broadcaster`.
   - `_MotionWorker` detects motion on downscaled frames, draws ROI, and publishes to `motion_broadcaster`.
   - Raw stream uses a lightweight producer to encode frames for `raw_broadcaster`.
-  - Faces stream currently renders per-request; can be centralized similarly (FaceWorker + broadcaster).
-- **Discovery**: `helpers/mdns.py` advertises `_opensentry._tcp.local` for LAN discovery.
-- **Deployment**: `Dockerfile` + `compose.yaml` run Gunicorn (gevent) with `GUNICORN_WORKERS=1` for shared in-process broadcasters.
 
 ### Data flow
 
 ```mermaid
 graph TD
+{{ ... }}
   A[Camera /dev/video0] -->|BGR frames| B[CameraStream]
 
   B --> C1[Raw Producer]
@@ -164,7 +160,7 @@ Visit **http://127.0.0.1:5000** and log in with `admin/admin`.
 
 #### Using the included compose.yaml
 
-The repo includes a `compose.yaml` preconfigured to map `/dev/video0`, mount `./archives`, and set sane performance defaults.
+The repo includes a `compose.yaml` preconfigured to map `/dev/video0` and set sane performance defaults.
 
 ```bash
 # Build image and start the service (explicit daemon)
@@ -194,9 +190,6 @@ services:
       - /dev/video0:/dev/video0
     group_add:
       - video
-    volumes:
-      - ./archives:/app/archives
-      - ./config.json:/app/config.json
     restart: unless-stopped
 ```
 
@@ -232,12 +225,10 @@ services:
     group_add:
       - video
     volumes:
-      - opensentry_archives:/app/archives
       - opensentry_config:/app
     restart: unless-stopped
 
 volumes:
-  opensentry_archives:
   opensentry_config:
 ```
 
@@ -366,14 +357,6 @@ Or click **"Use local login for now"** on the OAuth2 unavailable page.
     "iterations": 2,
     "pad": 10
   },
-  "face_detection": {
-    "archive_unknown": true,
-    "min_duration_sec": 15,
-    "archive_dir": "./archives/unknown_faces",
-    "dedup_enabled": false,
-    "dedup_threshold": 10,
-    "cooldown_minutes": 0
-  },
   "auth": {
     "auth_mode": "local",
     "oauth2_base_url": "",
@@ -384,12 +367,6 @@ Or click **"Use local login for now"** on the OAuth2 unavailable page.
 }
 ```
 
-### Archives
-
-- **Location**: `./archives/unknown_faces/`
-- **Contains**: Unknown face snapshots and manifest
-- **Management**: View and promote/delete via `/archives/unknown_faces`
-
 ---
 
 ## 🌐 API & Endpoints
@@ -399,13 +376,11 @@ Or click **"Use local login for now"** on the OAuth2 unavailable page.
 | Endpoint | Description | Auth Required |
 |----------|-------------|---------------|
 | `/` | Dashboard | ✅ |
-| `/all_feeds` | 2x2 grid of all video streams | ✅ |
+| `/all_feeds` | Grid of all video streams | ✅ |
 | `/video_feed` | Raw camera feed (MJPEG) | ✅ |
 | `/video_feed_motion` | Motion detection overlay | ✅ |
 | `/video_feed_objects` | YOLO object detection | ✅ |
-| `/video_feed_faces` | Face detection overlay | ✅ |
 | `/settings` | Configuration page | ✅ |
-| `/archives/unknown_faces` | Face archive management | ✅ |
 | `/health` | Health check (200 OK) | ❌ |
 
 ### Authentication Routes
@@ -432,12 +407,11 @@ Or click **"Use local login for now"** on the OAuth2 unavailable page.
   "name": "OpenSentry",
   "version": "0.1.0",
   "port": 5000,
-  "caps": ["raw", "motion", "objects", "faces"],
+  "caps": ["raw", "motion", "objects"],
   "routes": {
     "raw": true,
     "motion": true,
-    "objects": true,
-    "faces": true
+    "objects": true
   },
   "camera": {
     "running": true,
@@ -611,6 +585,7 @@ OpenSentry advertises itself on the local network using mDNS (Zeroconf).
 | `name` | Device display name | `Front Door Camera` |
 | `ver` | OpenSentry version | `0.1.0` |
 | `caps` | Capabilities | `raw,motion,objects,faces` |
+| `caps` | Capabilities | `raw,motion,objects` |
 | `auth` | Auth mode | `session` or `token` |
 | `api` | Available APIs | `/status,/health` |
 | `path` | Web UI path | `/` |
@@ -902,6 +877,7 @@ MIT License - See [LICENSE](LICENSE) for details.
 - [ ] Set up `OPENSENTRY_API_TOKEN` for `/status` endpoint protection
 - [ ] Enable OAuth2 for centralized authentication
 - [ ] Regular backups of `config.json` and `archives/`
+- [ ] Regular backups of `config.json`
 - [ ] Keep dependencies updated (`uv sync` or `pip install --upgrade`)
 - [ ] Monitor logs for unauthorized access attempts
 - [ ] Use firewall rules to restrict access to trusted networks
