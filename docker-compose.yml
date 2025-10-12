@@ -20,8 +20,6 @@ services:
       # - OPENSENTRY_ALLOW_PLACEHOLDER=1
       # Disable mDNS if not needed in your network
       # - OPENSENTRY_MDNS_DISABLE=1
-    volumes:
-      - ./archives:/app/archives:rw
     devices:
       # Comment this out when using placeholder mode
       - "/dev/video0:/dev/video0"

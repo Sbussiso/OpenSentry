@@ -12,19 +12,9 @@ def render_settings_page(
     m_kernel: int,
     m_iters: int,
     m_pad: int,
-    f_archive: bool,
-    f_min_dur: int,
-    f_dir: str,
-    f_dedup: bool,
-    f_dd_th: int,
-    f_cool: int,
-    f_method: str,
-    f_embed_th: float,
     raw_ok: bool,
     motion_ok: bool,
     objects_ok: bool,
-    faces_ok: bool,
-    face_recognition_available: bool,
     unknowns: list = [],
     device_id: str = '',
     port: int = 5000,
@@ -53,10 +43,7 @@ def render_settings_page(
         options_html = '<p><em>YOLO classes unavailable. Install ultralytics and restart to configure.</em></p>'
 
     select_all_checked = 'checked' if select_all_flag else ''
-    archive_unknown_checked = 'checked' if f_archive else ''
-    face_dedup_checked = 'checked' if f_dedup else ''
-    method_embed_checked = 'checked' if f_method == 'embedding' else ''
-    method_phash_checked = 'checked' if f_method == 'phash' else ''
+    
 
     # OAuth2 settings
     auth_mode_local_checked = 'checked' if auth_mode == 'local' else ''
@@ -68,10 +55,7 @@ def render_settings_page(
     motion_text = 'Active' if motion_ok else 'Down'
     objects_class = 'ok' if objects_ok else 'down'
     objects_text = 'Active' if objects_ok else 'Down'
-    faces_class = 'ok' if faces_ok else 'down'
-    faces_text = 'Active' if faces_ok else 'Down'
-
-    face_recog_label = 'Available' if face_recognition_available else 'Unavailable'
+    
 
     # Build unknowns management HTML
     unknowns_html = ''
@@ -207,7 +191,7 @@ def render_settings_page(
                     <div class=\"status-item\"><span>Raw feed</span><span class=\"pill {raw_class}\">{raw_text}</span></div>
                     <div class=\"status-item\"><span>Motion detection</span><span class=\"pill {motion_class}\">{motion_text}</span></div>
                     <div class=\"status-item\"><span>Object detection</span><span class=\"pill {objects_class}\">{objects_text}</span></div>
-                    <div class=\"status-item\"><span>Face detection</span><span class=\"pill {faces_class}\">{faces_text}</span></div>
+                    
                 </div>
             </fieldset>
             <form method=\"post\" action=\"/settings\"> 
@@ -251,40 +235,6 @@ def render_settings_page(
                     <div class=\"options-grid\">{options_html}</div>
                 </fieldset>
                 <fieldset>
-                    <legend>Face detection</legend>
-                    <p>
-                        <label><input type=\"checkbox\" name=\"face_archive_unknown\" value=\"1\" {archive_unknown_checked}> Archive unknown faces</label>
-                    </p>
-                    <p><small>When enabled, if a face stays visible for at least {f_min_dur}s, a cropped snapshot is saved to <code>{f_dir}</code>.</small></p>
-                    <p><small>Embedding dedup requires <code>face_recognition</code>: {face_recog_label}.</small></p>
-                    <div class=\"md-grid\"> 
-                        <label class=\"control\">
-                            <span class=\"control-title\">Dedup method</span>
-                            <label><input type=\"radio\" name=\"face_dedup_method\" value=\"embedding\" {method_embed_checked}> Embedding</label>
-                            <label><input type=\"radio\" name=\"face_dedup_method\" value=\"phash\" {method_phash_checked}> pHash</label>
-                        </label>
-                        <label class=\"control\">
-                            <span class=\"control-title\">Min duration (sec): <output id=\"face_min_duration_sec_out\">{f_min_dur}</output></span>
-                            <input type=\"range\" name=\"face_min_duration_sec\" min=\"5\" max=\"60\" step=\"1\" value=\"{f_min_dur}\" oninput=\"document.getElementById('face_min_duration_sec_out').textContent=this.value\">
-                        </label>
-                        <label class=\"control\">
-                            <span class=\"control-title\">Dedup unknown faces: <output id=\"face_dedup_enabled_out\">{ 'ON' if f_dedup else 'OFF' }</output></span>
-                            <input type=\"checkbox\" name=\"face_dedup_enabled\" {face_dedup_checked} onchange=\"document.getElementById('face_dedup_enabled_out').textContent=this.checked?'ON':'OFF'\">
-                        </label>
-                        <label class=\"control\">
-                            <span class=\"control-title\">Dedup threshold (Hamming): <output id=\"face_dedup_threshold_out\">{f_dd_th}</output></span>
-                            <input type=\"range\" name=\"face_dedup_threshold\" min=\"0\" max=\"32\" step=\"1\" value=\"{f_dd_th}\" oninput=\"document.getElementById('face_dedup_threshold_out').textContent=this.value\">
-                        </label>
-                        <label class=\"control\">
-                            <span class=\"control-title\">Embedding threshold: <output id=\"face_embedding_threshold_out\">{f_embed_th}</output></span>
-                            <input type=\"range\" name=\"face_embedding_threshold\" min=\"0.3\" max=\"1.2\" step=\"0.01\" value=\"{f_embed_th}\" oninput=\"document.getElementById('face_embedding_threshold_out').textContent=this.value\">
-                        </label>
-                        <label class=\"control\">
-                            <span class=\"control-title\">Cooldown (minutes): <output id=\"face_cooldown_minutes_out\">{f_cool}</output></span>
-                            <input type=\"range\" name=\"face_cooldown_minutes\" min=\"0\" max=\"180\" step=\"5\" value=\"{f_cool}\" oninput=\"document.getElementById('face_cooldown_minutes_out').textContent=this.value\">
-                        </label>
-                    </div>
-                </fieldset>
                 <fieldset>
                     <legend>Motion detection sensitivity</legend>
                     <div class=\"md-grid\">
@@ -316,11 +266,7 @@ def render_settings_page(
                 <input type=\"hidden\" name=\"action\" value=\"reset_motion\"> 
                 <button type=\"submit\">Reset Motion Sensitivity to Defaults</button> 
             </form>
-            <form method=\"post\" action=\"/settings\" style=\"margin-top:10px;\"> 
-                <input type=\"hidden\" name=\"action\" value=\"reset_face_manifest\"> 
-                <button type=\"submit\">Reset Unknown Face Manifest</button> 
-            </form>
-            {unknowns_html}
+            
         </div>
         <script>
         (function() {{

@@ -32,7 +32,6 @@ services:
       # Use placeholder frames if no camera is available
       # - OPENSENTRY_ALLOW_PLACEHOLDER=1
     volumes:
-      - ./archives:/app/archives
       - /dev:/dev
     devices:
       - /dev/video0:/dev/video0

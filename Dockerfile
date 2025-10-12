@@ -9,10 +9,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Build tools and common runtime libs (cmake required for dlib on ARM)
+# Build tools and common runtime libs
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     build-essential \
-    cmake \
     pkg-config \
     git \
     libopenblas-dev \
@@ -23,7 +22,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     libpng16-16 \
     libglib2.0-0 \
     libgl1 \
- && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies with uv sync using the lockfile
 COPY pyproject.toml uv.lock ./
@@ -65,7 +64,6 @@ ENV PATH="/app/.venv/bin:${PATH}"
 RUN ln -sf /usr/local/bin/python3 /usr/bin/python3.12 || true
 
 EXPOSE 5000
-VOLUME ["/app/archives"]
 
 # Defaults for runtime
 ENV OPENSENTRY_PORT=5000 \
