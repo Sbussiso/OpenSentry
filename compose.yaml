@@ -1,73 +1,51 @@
-# Docker Compose for OpenSentry - SMV (Snapshot Motion Version)
-# Optimized for low-power devices (Raspberry Pi Zero W, Pi Zero 2 W, etc.)
+# docker compose for OpenSentry
+# Build and run on Raspberry Pi (arm64). For cross-builds, uncomment platform.
 
 services:
   opensentry:
     build:
       context: .
       dockerfile: Dockerfile
-      # platform: linux/arm64    # Uncomment for cross-platform builds (Pi 3/4/5)
-      # platform: linux/arm/v6   # Uncomment for Pi Zero W (ARMv6)
-    image: opensentry-smv:latest
-    container_name: opensentry-smv
+      # platform: linux/arm64    # uncomment if building on non-ARM host with buildx
+    image: opensentry:pi
+    container_name: opensentry
     ports:
       - "${OPENSENTRY_PORT:-5000}:${OPENSENTRY_PORT:-5000}"
     environment:
-      # ⚠️  CHANGE THESE IN PRODUCTION!
+      # Change these defaults in production
       - OPENSENTRY_USER=admin
       - OPENSENTRY_PASS=admin
-      - OPENSENTRY_SECRET=please-change-me-to-random-string
-
-      # Application settings
+      - OPENSENTRY_SECRET=please-change-me
       - OPENSENTRY_LOG_LEVEL=INFO
       - OPENSENTRY_PORT=${OPENSENTRY_PORT:-5000}
-
-      # Snapshot capture settings
-      - OPENSENTRY_SNAPSHOT_INTERVAL=10  # Capture every 10 seconds
-      - OPENSENTRY_JPEG_QUALITY=75       # JPEG quality (30-95)
-
-      # Gunicorn configuration (single worker for low-power devices)
-      - GUNICORN_WORKERS=1
+      - GUNICORN_WORKERS=1  # Single worker to prevent camera contention (gevent handles concurrency)
       - GUNICORN_TIMEOUT=120
-      - GUNICORN_WORKER_CLASS=sync  # Sync mode for snapshot-only
-
-      # Thread limits (critical for low-power devices)
+      - GUNICORN_WORKER_CLASS=gevent  # Async worker allows concurrent video streaming + API requests
+      # Thread caps to reduce CPU contention inside container
       - OMP_NUM_THREADS=1
       - OPENBLAS_NUM_THREADS=1
       - MKL_NUM_THREADS=1
       - NUMEXPR_NUM_THREADS=1
-
-      # Camera settings (optional overrides)
-      - OPENSENTRY_CAMERA_MJPEG=1        # Use hardware MJPEG if available
-      # - OPENSENTRY_CAMERA_WIDTH=640    # Uncomment to override camera resolution
+      # Camera hints for compatibility; adjust if needed
+      - OPENSENTRY_CAMERA_MJPEG=1
+      # - OPENSENTRY_CAMERA_WIDTH=640
       # - OPENSENTRY_CAMERA_HEIGHT=480
-      # - OPENSENTRY_CAMERA_FPS=15
-
-      # Testing without camera
-      # - OPENSENTRY_ALLOW_PLACEHOLDER=1 # Uncomment to test without a camera
-
-      # OpenCV V4L2 backend for Raspberry Pi
+      # Use placeholder frames if no camera is available
+      # - OPENSENTRY_ALLOW_PLACEHOLDER=1
+      # OpenCV thread configuration for ARM stability
       - OPENCV_VIDEOIO_PRIORITY_LIST=V4L2
+      - OPENCV_VIDEOIO_DEBUG=1
     volumes:
       - /dev:/dev
-      - ./snapshots:/app/snapshots  # Persist snapshots on host filesystem
-      # - ./config.json:/app/config.json  # Optional: mount custom config
+      - ./snapshots:/app/snapshots  # Persist automatic snapshots on host
     devices:
-      - /dev/video0:/dev/video0  # Primary camera device
-      # - /dev/video1:/dev/video1  # Optional: additional cameras
+      - /dev/video0:/dev/video0
+    # - /dev/video1:/dev/video1
     group_add:
       - video
     device_cgroup_rules:
-      - 'c 81:* rmw'  # Allow access to video devices
+      - 'c 81:* rmw'
     security_opt:
-      - seccomp:unconfined  # Required for some camera drivers
+      - seccomp:unconfined
     restart: unless-stopped
-    privileged: true  # Required for camera access on some systems
-
-    # Optional: Health check
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+    privileged: true  # Required for camera access with some USB cameras/systems

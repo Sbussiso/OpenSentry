@@ -15,10 +15,11 @@ from io import BytesIO
 import cv2
 from helpers.camera import CameraStream
 from helpers.settings_page import render_settings_page
-from helpers.snapshot_page import render_snapshot_page
+from helpers.index_page import render_index_page
 from helpers.theme import get_css, header_html
 from helpers.mdns import MdnsAdvertiser
 from helpers.encoders import init_jpeg_encoder, encode_jpeg_bgr
+from helpers.frame_hub import Broadcaster
 from helpers.config import load_config as _load_config, save_config as _save_config
 
 app = Flask(__name__)
@@ -538,26 +539,91 @@ def logs_download():
         pass
     return resp
 
-# JPEG output tuning (env-tunable)
+# Stream output tuning (env-tunable)
+OUTPUT_MAX_WIDTH = int(os.environ.get('OPENSENTRY_OUTPUT_MAX_WIDTH', '960'))
 JPEG_QUALITY = int(os.environ.get('OPENSENTRY_JPEG_QUALITY', '75'))
+RAW_TARGET_FPS = int(os.environ.get('OPENSENTRY_RAW_FPS', '15'))
+
+# Video/stream configurable defaults and live config
+VIDEO_DEFAULTS = {
+    'width': 0,
+    'height': 0,
+    'fps': 15,
+    'mjpeg': True,
+}
+STREAM_DEFAULTS = {
+    'max_width': OUTPUT_MAX_WIDTH,
+    'jpeg_quality': JPEG_QUALITY,
+    'raw_fps': RAW_TARGET_FPS,
+}
+video_config = dict(VIDEO_DEFAULTS)
+stream_config = dict(STREAM_DEFAULTS)
+
+def _apply_video_stream_settings():
+    """Apply current video/stream settings to runtime (env + globals) and refresh camera."""
+    global OUTPUT_MAX_WIDTH, JPEG_QUALITY, RAW_TARGET_FPS
+    # Apply stream settings
+    try:
+        OUTPUT_MAX_WIDTH = int(stream_config.get('max_width', OUTPUT_MAX_WIDTH))
+        JPEG_QUALITY = int(stream_config.get('jpeg_quality', JPEG_QUALITY))
+        RAW_TARGET_FPS = int(stream_config.get('raw_fps', RAW_TARGET_FPS))
+    except Exception:
+        pass
+    # Apply camera settings via env for helpers.camera
+    try:
+        w = int(video_config.get('width', 0) or 0)
+        h = int(video_config.get('height', 0) or 0)
+        f = int(video_config.get('fps', 0) or 0)
+        m = bool(video_config.get('mjpeg', True))
+        if w > 0:
+            os.environ['OPENSENTRY_CAMERA_WIDTH'] = str(w)
+        else:
+            os.environ.pop('OPENSENTRY_CAMERA_WIDTH', None)
+        if h > 0:
+            os.environ['OPENSENTRY_CAMERA_HEIGHT'] = str(h)
+        else:
+            os.environ.pop('OPENSENTRY_CAMERA_HEIGHT', None)
+        if f > 0:
+            os.environ['OPENSENTRY_CAMERA_FPS'] = str(f)
+        else:
+            os.environ.pop('OPENSENTRY_CAMERA_FPS', None)
+        os.environ['OPENSENTRY_CAMERA_MJPEG'] = '1' if m else '0'
+        # Update camera sleep interval and force reopen to apply
+        try:
+            if f > 0:
+                camera_stream._sleep = 1.0 / max(1, f)
+        except Exception:
+            pass
+        try:
+            if camera_stream.camera is not None:
+                camera_stream.camera.release()
+        except Exception:
+            pass
+        camera_stream.camera = None
+    except Exception:
+        pass
 
 # Thread-safe settings lock
 settings_lock = threading.Lock()
 
-# Motion detection defaults (simple frame differencing for snapshots)
+# Motion detection defaults and settings (thread-safe, in-memory)
 MOTION_DEFAULTS = {
-    'min_area': 500,           # Minimum contour area (pixels)
-    'pad': 10,                 # Bounding box padding (pixels)
+    'threshold': 25,           # [DEPRECATED] pixel diff threshold (kept for compatibility)
+    'min_area': 500,           # minimum contour area (pixels)
+    'kernel': 15,              # [DEPRECATED] dilation kernel (kept for compatibility)
+    'iterations': 2,           # [DEPRECATED] dilation iterations (kept for compatibility)
+    'pad': 10,                 # box padding (px)
+    'mog2_var_threshold': 16,  # MOG2 variance threshold (8-30, lower = more sensitive)
+    'mog2_history': 500,       # MOG2 learning history (frames, ~30 sec @ 15fps)
 }
 motion_detection_config = MOTION_DEFAULTS.copy()
 
-# Snapshot configuration (always enabled - this is snapshot-only version)
+# Automatic snapshot defaults and settings
 SNAPSHOT_DEFAULTS = {
-    'interval': 10,             # Seconds between snapshots (5-60)
-    'motion_detection': True,   # Enable motion detection on snapshots
-    'retention_count': 100,     # Maximum number of snapshots to keep
-    'retention_days': 7,        # Maximum age of snapshots in days
-    'directory': 'snapshots',   # Directory to save snapshots (relative to BASE_DIR)
+    'enabled': False,          # Enable automatic snapshots on motion
+    'cooldown': 15,            # Minimum seconds between snapshots (5-60)
+    'motion_threshold': 5000,  # Minimum total motion area (pixels) to trigger
+    'directory': 'snapshots',  # Directory to save snapshots (relative to BASE_DIR)
 }
 snapshot_config = SNAPSHOT_DEFAULTS.copy()
 
@@ -576,11 +642,24 @@ if _cfg:
             # Load auth config if present
             if 'auth' in _cfg and isinstance(_cfg['auth'], dict):
                 auth_config.update(_cfg['auth'])
+            # Load video/stream config if present
+            try:
+                if 'video' in _cfg and isinstance(_cfg['video'], dict):
+                    video_config.update(_cfg['video'])
+                if 'stream' in _cfg and isinstance(_cfg['stream'], dict):
+                    stream_config.update(_cfg['stream'])
+            except Exception:
+                pass
             # Load snapshot config if present
             if 'snapshots' in _cfg and isinstance(_cfg['snapshots'], dict):
                 snapshot_config.update(_cfg['snapshots'])
             # read existing device_id if present
             DEVICE_ID = _cfg.get('device_id') if isinstance(_cfg, dict) else None
+        # Apply loaded video/stream settings (updates env and camera)
+        try:
+            _apply_video_stream_settings()
+        except Exception:
+            pass
     except Exception:
         DEVICE_ID = None
 
@@ -592,15 +671,6 @@ if not DEVICE_ID:
             _save_config(CONFIG_PATH, motion_detection_config, device_id=DEVICE_ID)
     except Exception:
         pass
-
-# Apply environment variable overrides for snapshot settings
-try:
-    interval = int(os.environ.get('OPENSENTRY_SNAPSHOT_INTERVAL', '0'))
-    if interval > 0:
-        with settings_lock:
-            snapshot_config['interval'] = interval
-except Exception:
-    pass
 
 # Ensure snapshots directory exists
 def _get_snapshots_dir() -> str:
@@ -648,9 +718,9 @@ def _ensure_camera_started():
         _start_mdns_advertiser()
     except Exception:
         pass
-    # Start snapshot worker once
+    # Start broadcasters/workers once
     try:
-        _ensure_snapshot_worker_started()
+        _ensure_hubs_started()
     except Exception:
         pass
 
@@ -680,28 +750,51 @@ def _start_mdns_advertiser():
         logger.warning('mDNS advertise failed: %s', e)
 
 
-# ---------- Snapshot worker (interval-based capture for low-power devices) ----------
+# ---------- Centralized streaming hubs and background workers ----------
+
+# Raw stream broadcaster (single encode shared by all clients)
+def _produce_raw_jpeg() -> bytes | None:
+    frame = camera_stream.get_frame()
+    if frame is None:
+        # Optional placeholder to make streams testable without a camera
+        if os.environ.get('OPENSENTRY_ALLOW_PLACEHOLDER', '0') in ('1', 'true', 'TRUE'):
+            import numpy as _np
+            f = _np.zeros((480, 640, 3), dtype=_np.uint8)
+            cv2.putText(f, 'NO CAMERA', (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+            return encode_jpeg_bgr(f, JPEG_QUALITY)
+        return None
+    # Downscale for output if needed
+    H, W = frame.shape[:2]
+    if W > OUTPUT_MAX_WIDTH:
+        scale = OUTPUT_MAX_WIDTH / float(W)
+        frame = cv2.resize(frame, (int(W * scale), int(H * scale)), interpolation=cv2.INTER_AREA)
+    return encode_jpeg_bgr(frame, JPEG_QUALITY)
 
 
-class _SnapshotWorker:
-    """Interval-based snapshot capture worker for low-power devices.
+raw_broadcaster = Broadcaster(
+    name='raw',
+    produce_fn=_produce_raw_jpeg,
+    fps_getter=lambda: int(stream_config.get('raw_fps', RAW_TARGET_FPS)),
+)
 
-    Captures snapshots at configurable intervals instead of continuous streaming.
-    Uses simple frame differencing for motion detection to minimize CPU usage.
-    """
+
+class _MotionWorker:
     def __init__(self):
         self._th = None
         self._running = False
         self._lock = threading.Lock()
         self._latest: bytes | None = None
-        self._prev_frame = None
-        self._last_capture_time = 0
+        self._prev_small = None
+        self._proc_scale = 0.5
+        self._bg_subtractor = None  # MOG2 background subtractor
+        self._mog2_params = None  # Track current MOG2 parameters (var_threshold, history)
+        self._last_snapshot_time = 0  # Track last automatic snapshot time (epoch seconds)
 
     def start(self):
         if self._running:
             return
         self._running = True
-        self._th = threading.Thread(target=self._run, name='SnapshotWorker', daemon=True)
+        self._th = threading.Thread(target=self._run, name='MotionWorker', daemon=True)
         self._th.start()
 
     def stop(self):
@@ -711,209 +804,154 @@ class _SnapshotWorker:
         with self._lock:
             return self._latest
 
-    def _simple_motion_detect(self, frame, prev_frame, min_area: int) -> tuple[bool, int, list]:
-        """Simple frame differencing for motion detection (lightweight).
-        Returns: (motion_detected, total_area, contours)
-        """
-        if prev_frame is None:
-            return False, 0, []
+    def _maybe_save_snapshot(self, frame, contours, min_area: int):
+        """Save automatic snapshot if conditions are met."""
+        import time
 
-        # Convert to grayscale and blur
-        gray1 = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-        gray2 = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray1 = cv2.GaussianBlur(gray1, (21, 21), 0)
-        gray2 = cv2.GaussianBlur(gray2, (21, 21), 0)
+        # Check if automatic snapshots are enabled
+        with settings_lock:
+            enabled = snapshot_config.get('enabled', False)
+            if not enabled:
+                return
 
-        # Compute absolute difference
-        frame_delta = cv2.absdiff(gray1, gray2)
-        thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)[1]
+            cooldown = int(snapshot_config.get('cooldown', 15))
+            motion_threshold = int(snapshot_config.get('motion_threshold', 5000))
 
-        # Light morphological filtering
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-
-        # Find contours
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Check cooldown period
+        current_time = time.time()
+        if current_time - self._last_snapshot_time < cooldown:
+            return
 
         # Calculate total motion area
-        total_area = sum(cv2.contourArea(c) for c in contours if cv2.contourArea(c) >= min_area)
-        motion_detected = total_area > 0
+        total_motion_area = sum(cv2.contourArea(c) for c in contours if cv2.contourArea(c) >= min_area)
 
-        return motion_detected, int(total_area), contours
+        # Check if motion exceeds threshold
+        if total_motion_area < motion_threshold:
+            return
 
-    def _draw_motion_overlay(self, frame, contours, min_area: int, pad: int) -> np.ndarray:
-        """Draw motion detection overlay on frame."""
-        motion_detected = False
-        x_min = y_min = x_max = y_max = None
-
-        for contour in contours:
-            if cv2.contourArea(contour) < min_area:
-                continue
-            (x, y, w, h) = cv2.boundingRect(contour)
-            if x_min is None:
-                x_min, y_min, x_max, y_max = x, y, x + w, y + h
-                motion_detected = True
-            else:
-                x_min = min(x_min, x)
-                y_min = min(y_min, y)
-                x_max = max(x_max, x + w)
-                y_max = max(y_max, y + h)
-
-        if motion_detected:
-            x1 = max(0, x_min - pad)
-            y1 = max(0, y_min - pad)
-            x2 = min(frame.shape[1] - 1, x_max + pad)
-            y2 = min(frame.shape[0] - 1, y_max + pad)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
-
-        status = "MOTION DETECTED" if motion_detected else "No Motion"
-        color = (0, 0, 255) if motion_detected else (0, 255, 0)
-        cv2.putText(frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
-
-        return frame
-
-    def _cleanup_old_snapshots(self):
-        """Remove old snapshots based on retention settings."""
+        # Save snapshot
         try:
-            with settings_lock:
-                max_count = int(snapshot_config.get('retention_count', 100))
-                max_days = int(snapshot_config.get('retention_days', 7))
-
+            from datetime import datetime
             snapshots_dir = _get_snapshots_dir()
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            filename = f"{timestamp}_motion.jpg"
+            filepath = os.path.join(snapshots_dir, filename)
 
-            # Get all snapshot files sorted by modification time (newest first)
-            snapshot_files = []
-            for f in os.listdir(snapshots_dir):
-                if f.endswith('.jpg') or f.endswith('.jpeg'):
-                    filepath = os.path.join(snapshots_dir, f)
-                    mtime = os.path.getmtime(filepath)
-                    snapshot_files.append((filepath, mtime))
-
-            snapshot_files.sort(key=lambda x: x[1], reverse=True)
-
-            # Remove files exceeding count limit
-            if len(snapshot_files) > max_count:
-                for filepath, _ in snapshot_files[max_count:]:
-                    try:
-                        os.remove(filepath)
-                        logger.debug(f"Removed old snapshot (count limit): {os.path.basename(filepath)}")
-                    except Exception as e:
-                        logger.error(f"Failed to remove snapshot {filepath}: {e}")
-
-            # Remove files exceeding age limit
-            current_time = time.time()
-            max_age_seconds = max_days * 86400
-            for filepath, mtime in snapshot_files[:max_count]:  # Only check retained files
-                age = current_time - mtime
-                if age > max_age_seconds:
-                    try:
-                        os.remove(filepath)
-                        logger.debug(f"Removed old snapshot (age limit): {os.path.basename(filepath)}")
-                    except Exception as e:
-                        logger.error(f"Failed to remove snapshot {filepath}: {e}")
-
+            cv2.imwrite(filepath, frame)
+            self._last_snapshot_time = current_time
+            logger.info(f"Automatic snapshot saved: {filename} (motion area: {total_motion_area:.0f}px)")
         except Exception as e:
-            logger.error(f"Snapshot cleanup failed: {e}")
+            logger.error(f"Failed to save automatic snapshot: {e}")
 
     def _run(self):
-        """Main snapshot capture loop."""
-        from datetime import datetime
-
-        logger.info("SnapshotWorker started (interval-based capture mode)")
-
+        last_send = 0.0
         while self._running:
-            try:
-                # Get snapshot settings
-                with settings_lock:
-                    interval = int(snapshot_config.get('interval', 10))
-                    motion_enabled = bool(snapshot_config.get('motion_detection', True))
+            frame = camera_stream.get_frame()
+            if frame is None:
+                time.sleep(0.05)
+                continue
 
-                # Check if it's time for next snapshot
-                current_time = time.time()
-                if current_time - self._last_capture_time < interval:
-                    time.sleep(0.5)
+            # FPS cap for processing to avoid CPU spikes
+            now_ts = time.time()
+            target_fps = max(1, int(stream_config.get('raw_fps', RAW_TARGET_FPS)))
+            min_interval = 1.0 / float(target_fps)
+            if (now_ts - last_send) < min_interval:
+                time.sleep(max(0.0, min_interval - (now_ts - last_send)))
+            last_send = time.time()
+
+            # Downscale for motion processing
+            H, W = frame.shape[:2]
+            small = cv2.resize(frame, (int(W * self._proc_scale), int(H * self._proc_scale)), interpolation=cv2.INTER_AREA)
+
+            # Load settings snapshot
+            cfg = _get_motion_settings_snapshot()
+            var_threshold = int(cfg.get('mog2_var_threshold', 16))
+            history = int(cfg.get('mog2_history', 500))
+            min_area = int(cfg.get('min_area', 500))
+            pad = int(cfg.get('pad', 10))
+
+            # Initialize or reinitialize MOG2 if parameters changed
+            current_params = (var_threshold, history)
+            if self._bg_subtractor is None or self._mog2_params != current_params:
+                self._bg_subtractor = cv2.createBackgroundSubtractorMOG2(
+                    history=history,           # Learn from N frames of history
+                    varThreshold=var_threshold, # Pixel variance threshold (sensitivity)
+                    detectShadows=False         # Disable shadow detection for speed
+                )
+                self._mog2_params = current_params
+                logger.info(f"Initialized MOG2 background subtractor (history={history}, varThreshold={var_threshold})")
+
+            # Apply MOG2 background subtraction (replaces frame differencing)
+            fg_mask = self._bg_subtractor.apply(small)
+
+            # Optional: Light morphological filtering to reduce noise
+            # (much lighter than the old dilation approach)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
+
+            contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            motion_detected = False
+            x_min = y_min = x_max = y_max = None
+            for contour in contours:
+                if cv2.contourArea(contour) < min_area:
                     continue
-
-                # Capture frame
-                frame = camera_stream.get_frame()
-                if frame is None:
-                    time.sleep(1)
-                    continue
-
-                # Perform motion detection if enabled
-                motion_detected = False
-                total_area = 0
-                contours = []
-
-                if motion_enabled:
-                    cfg = _get_motion_settings_snapshot()
-                    min_area = int(cfg.get('min_area', 500))
-                    pad = int(cfg.get('pad', 10))
-
-                    # Use simple frame differencing (lightweight)
-                    motion_detected, total_area, contours = self._simple_motion_detect(
-                        frame, self._prev_frame, min_area
-                    )
-
-                    # Draw motion overlay
-                    if motion_detected:
-                        frame = self._draw_motion_overlay(frame.copy(), contours, min_area, pad)
-                    else:
-                        # Add "No Motion" text even when no motion
-                        frame = frame.copy()
-                        cv2.putText(frame, "No Motion", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-                # Add timestamp overlay
-                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                cv2.putText(frame, timestamp, (10, frame.shape[0] - 10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
-                # Encode to JPEG
-                jpg = encode_jpeg_bgr(frame, JPEG_QUALITY)
-
-                # Update latest frame for web display
-                with self._lock:
-                    self._latest = jpg
-
-                # Save snapshot to disk
-                snapshots_dir = _get_snapshots_dir()
-                filename = f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
-                if motion_detected:
-                    filename += f"_motion_{total_area}px.jpg"
+                (x, y, w, h) = cv2.boundingRect(contour)
+                if x_min is None:
+                    x_min, y_min, x_max, y_max = x, y, x + w, y + h
+                    motion_detected = True
                 else:
-                    filename += "_snapshot.jpg"
-                filepath = os.path.join(snapshots_dir, filename)
+                    x_min = min(x_min, x)
+                    y_min = min(y_min, y)
+                    x_max = max(x_max, x + w)
+                    y_max = max(y_max, y + h)
 
-                cv2.imwrite(filepath, frame)
-                logger.info(f"Snapshot saved: {filename}")
+            draw_frame = frame
+            if motion_detected:
+                inv = 1.0 / self._proc_scale
+                x1 = int(max(0, x_min - pad) * inv)
+                y1 = int(max(0, y_min - pad) * inv)
+                x2 = int(min(small.shape[1] - 1, x_max + pad) * inv)
+                y2 = int(min(small.shape[0] - 1, y_max + pad) * inv)
+                cv2.rectangle(draw_frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
+            status = "MOTION DETECTED" if motion_detected else "No Motion"
+            color = (0, 0, 255) if motion_detected else (0, 255, 0)
+            cv2.putText(draw_frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
 
-                # Store current frame for next comparison
-                self._prev_frame = camera_stream.get_frame()
-                self._last_capture_time = current_time
+            # Automatic snapshot on motion detection
+            if motion_detected:
+                self._maybe_save_snapshot(draw_frame, contours, min_area)
 
-                # Cleanup old snapshots periodically (every 10 captures)
-                if int(current_time) % 10 == 0:
-                    self._cleanup_old_snapshots()
+            # Downscale for output if needed and encode
+            H2, W2 = draw_frame.shape[:2]
+            if W2 > OUTPUT_MAX_WIDTH:
+                scale_out = OUTPUT_MAX_WIDTH / float(W2)
+                draw_frame = cv2.resize(draw_frame, (int(W2 * scale_out), int(H2 * scale_out)), interpolation=cv2.INTER_AREA)
 
-            except Exception as e:
-                logger.error(f"SnapshotWorker error: {e}")
-                time.sleep(1)
+            jpg = encode_jpeg_bgr(draw_frame, JPEG_QUALITY)
+            with self._lock:
+                self._latest = jpg
 
 
-# Initialize snapshot worker
-_snapshot_worker = _SnapshotWorker()
+_motion_worker = _MotionWorker()
 
-_worker_started = False
+motion_broadcaster = Broadcaster(
+    name='motion',
+    produce_fn=lambda: _motion_worker.get_latest(),
+    fps_getter=lambda: int(stream_config.get('raw_fps', RAW_TARGET_FPS)),
+)
 
-def _ensure_snapshot_worker_started():
-    """Start the snapshot worker (interval-based capture)."""
-    global _worker_started
-    if _worker_started:
+
+_hubs_started = False
+
+def _ensure_hubs_started():
+    global _hubs_started
+    if _hubs_started:
         return
-
-    _snapshot_worker.start()
-    logger.info("Snapshot worker started (interval-based capture mode)")
-    _worker_started = True
+    raw_broadcaster.start()
+    _motion_worker.start()
+    motion_broadcaster.start()
+    _hubs_started = True
 
 @app.after_request
 def _add_observability_headers(resp):
@@ -946,13 +984,27 @@ def _find_available_port(start_port: int, attempts: int = 10) -> int:
     return start_port
 
 
+def generate_frames():
+    """Centralized raw stream shared across clients."""
+    return raw_broadcaster.multipart_stream()
+
+
 def _get_motion_settings_snapshot():
-    """Get current motion detection settings."""
     with settings_lock:
         return {
+            'threshold': int(motion_detection_config.get('threshold', 25)),
+            'kernel': int(motion_detection_config.get('kernel', 15)),
+            'iterations': int(motion_detection_config.get('iterations', 2)),
             'min_area': int(motion_detection_config.get('min_area', 500)),
             'pad': int(motion_detection_config.get('pad', 10)),
+            'mog2_var_threshold': int(motion_detection_config.get('mog2_var_threshold', 16)),
+            'mog2_history': int(motion_detection_config.get('mog2_history', 500)),
         }
+
+
+def generate_frames_with_detection():
+    """Centralized motion stream shared across clients (background processing)."""
+    return motion_broadcaster.multipart_stream()
 
  
 
@@ -961,8 +1013,8 @@ def _get_motion_settings_snapshot():
  
 @app.route('/')
 def index():
-    """Root endpoint - renders the snapshot gallery."""
-    return render_snapshot_page()
+    """Root endpoint - renders the index page via helper."""
+    return render_index_page()
 
 @app.route('/settings', methods=['GET', 'POST'])
 def settings():
@@ -1041,32 +1093,66 @@ def settings():
 
         ma_in = _to_int(request.form.get('md_min_area', ''), motion_detection_config['min_area'])
         pd_in = _to_int(request.form.get('md_pad', ''), motion_detection_config['pad'])
+        mog2_var_in = _to_int(request.form.get('mog2_var_threshold', ''), motion_detection_config.get('mog2_var_threshold', 16))
+        mog2_hist_in = _to_int(request.form.get('mog2_history', ''), motion_detection_config.get('mog2_history', 500))
 
         # Clamp to sane ranges
         ma_in = max(0, ma_in)
         pd_in = max(0, pd_in)
+        mog2_var_in = max(8, min(30, mog2_var_in))
+        mog2_hist_in = max(200, min(1000, mog2_hist_in))
 
         with settings_lock:
             # Motion sensitivity
             motion_detection_config['min_area'] = ma_in
             motion_detection_config['pad'] = pd_in
+            motion_detection_config['mog2_var_threshold'] = mog2_var_in
+            motion_detection_config['mog2_history'] = mog2_hist_in
+            # Camera & Stream settings from form
+            def _to_int2(val, default):
+                try:
+                    return int(val)
+                except Exception:
+                    return default
+            cam_width_in = request.form.get('cam_width')
+            cam_height_in = request.form.get('cam_height')
+            cam_fps_in = request.form.get('cam_fps')
+            cam_mjpeg_in = 'cam_mjpeg' in request.form
+            stream_jpeg_q_in = request.form.get('stream_jpeg_quality')
+            stream_max_w_in = request.form.get('stream_max_width')
+            stream_raw_fps_in = request.form.get('stream_raw_fps')
+            if cam_width_in is not None and cam_width_in != '':
+                video_config['width'] = max(0, _to_int2(cam_width_in, video_config.get('width', 0)))
+            if cam_height_in is not None and cam_height_in != '':
+                video_config['height'] = max(0, _to_int2(cam_height_in, video_config.get('height', 0)))
+            if cam_fps_in is not None and cam_fps_in != '':
+                video_config['fps'] = max(1, _to_int2(cam_fps_in, video_config.get('fps', 15)))
+            video_config['mjpeg'] = bool(cam_mjpeg_in)
+            if stream_jpeg_q_in is not None and stream_jpeg_q_in != '':
+                stream_config['jpeg_quality'] = max(30, min(95, _to_int2(stream_jpeg_q_in, stream_config.get('jpeg_quality', JPEG_QUALITY))))
+            if stream_max_w_in is not None and stream_max_w_in != '':
+                stream_config['max_width'] = max(320, _to_int2(stream_max_w_in, stream_config.get('max_width', OUTPUT_MAX_WIDTH)))
+            if stream_raw_fps_in is not None and stream_raw_fps_in != '':
+                stream_config['raw_fps'] = max(1, _to_int2(stream_raw_fps_in, stream_config.get('raw_fps', RAW_TARGET_FPS)))
 
             # Snapshot settings from form
-            snapshot_interval_in = _to_int(request.form.get('snapshot_interval', ''), snapshot_config.get('interval', 10))
-            snapshot_motion_in = 'snapshot_motion_detection' in request.form
-            snapshot_retention_count_in = _to_int(request.form.get('snapshot_retention_count', ''), snapshot_config.get('retention_count', 100))
-            snapshot_retention_days_in = _to_int(request.form.get('snapshot_retention_days', ''), snapshot_config.get('retention_days', 7))
+            snapshot_enabled_in = 'snapshot_enabled' in request.form
+            snapshot_cooldown_in = _to_int2(request.form.get('snapshot_cooldown', ''), snapshot_config.get('cooldown', 15))
+            snapshot_threshold_in = _to_int2(request.form.get('snapshot_motion_threshold', ''), snapshot_config.get('motion_threshold', 5000))
             snapshot_dir_in = (request.form.get('snapshot_directory', '') or 'snapshots').strip()
 
-            snapshot_config['interval'] = max(5, min(60, snapshot_interval_in))
-            snapshot_config['motion_detection'] = snapshot_motion_in
-            snapshot_config['retention_count'] = max(10, min(1000, snapshot_retention_count_in))
-            snapshot_config['retention_days'] = max(1, min(30, snapshot_retention_days_in))
+            snapshot_config['enabled'] = snapshot_enabled_in
+            snapshot_config['cooldown'] = max(5, min(60, snapshot_cooldown_in))
+            snapshot_config['motion_threshold'] = max(1000, min(20000, snapshot_threshold_in))
             snapshot_config['directory'] = snapshot_dir_in
 
-        # Persist config to disk after update
+        # Apply live and persist config to disk after general update
         try:
-            _save_config(CONFIG_PATH, motion_detection_config, snapshot_config=snapshot_config)
+            _apply_video_stream_settings()
+        except Exception:
+            pass
+        try:
+            _save_config(CONFIG_PATH, motion_detection_config, video_config=video_config, stream_config=stream_config, snapshot_config=snapshot_config)
         except Exception:
             pass
         return redirect(url_for('settings'))
@@ -1074,22 +1160,26 @@ def settings():
     with settings_lock:
         m_min_area = motion_detection_config['min_area']
         m_pad = motion_detection_config['pad']
+        mog2_var_threshold = motion_detection_config.get('mog2_var_threshold', 16)
+        mog2_history = motion_detection_config.get('mog2_history', 500)
         # Snapshot config
-        snapshot_interval = snapshot_config.get('interval', 10)
-        snapshot_motion_detection = snapshot_config.get('motion_detection', True)
-        snapshot_retention_count = snapshot_config.get('retention_count', 100)
-        snapshot_retention_days = snapshot_config.get('retention_days', 7)
+        snapshot_enabled = snapshot_config.get('enabled', False)
+        snapshot_cooldown = snapshot_config.get('cooldown', 15)
+        snapshot_motion_threshold = snapshot_config.get('motion_threshold', 5000)
         snapshot_directory = snapshot_config.get('directory', 'snapshots')
 
-    # Camera health status
+    # Snapshot simple route health/status
     has_frame = (camera_stream.get_frame() is not None)
-    camera_ok = camera_stream.running and has_frame
+    raw_ok = camera_stream.running and has_frame
+    motion_ok = raw_ok  # motion depends on camera frames
 
     page_html = render_settings_page(
         m_min_area=m_min_area,
         m_pad=m_pad,
-        raw_ok=camera_ok,
-        motion_ok=camera_ok,
+        mog2_var_threshold=mog2_var_threshold,
+        mog2_history=mog2_history,
+        raw_ok=raw_ok,
+        motion_ok=motion_ok,
         device_id=str(DEVICE_ID or ''),
         port=int(APP_PORT),
         mdns_enabled=(not MDNS_DISABLE),
@@ -1099,10 +1189,16 @@ def settings():
         oauth2_client_id=str(auth_config.get('oauth2_client_id', '')),
         oauth2_client_secret=str(auth_config.get('oauth2_client_secret', '')),
         oauth2_scope=str(auth_config.get('oauth2_scope', 'openid profile email offline_access')),
-        snapshot_interval=snapshot_interval,
-        snapshot_motion_detection=snapshot_motion_detection,
-        snapshot_retention_count=snapshot_retention_count,
-        snapshot_retention_days=snapshot_retention_days,
+        cam_width=int(video_config.get('width', 0)),
+        cam_height=int(video_config.get('height', 0)),
+        cam_fps=int(video_config.get('fps', 15)),
+        cam_mjpeg=bool(video_config.get('mjpeg', True)),
+        out_max_width=int(stream_config.get('max_width', OUTPUT_MAX_WIDTH)),
+        jpeg_quality=int(stream_config.get('jpeg_quality', JPEG_QUALITY)),
+        raw_fps=int(stream_config.get('raw_fps', RAW_TARGET_FPS)),
+        snapshot_enabled=snapshot_enabled,
+        snapshot_cooldown=snapshot_cooldown,
+        snapshot_motion_threshold=snapshot_motion_threshold,
         snapshot_directory=snapshot_directory,
     )
     return page_html
@@ -1125,9 +1221,8 @@ def api_oauth2_test():
 
 @app.route('/api/snapshot')
 def api_snapshot():
-    """Capture a snapshot of the current frame."""
-    frame_data = _snapshot_worker.get_latest()
-
+    """Capture a snapshot of the current motion detection frame."""
+    frame_data = _motion_worker.get_latest()
     if frame_data is None:
         return jsonify({"error": "No frame available"}), 503
 
@@ -1139,112 +1234,32 @@ def api_snapshot():
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return resp
 
-@app.route('/api/snapshots/latest')
-def api_latest_snapshot():
-    """Get the latest snapshot image (for periodic refresh in UI)."""
-    frame_data = _snapshot_worker.get_latest()
-
-    if frame_data is None:
-        return jsonify({"error": "No snapshot available"}), 503
-
-    resp = Response(frame_data, mimetype='image/jpeg')
-    resp.headers['Cache-Control'] = 'no-cache, must-revalidate'
+@app.route('/video_feed')
+def video_feed():
+    """Video streaming route - raw feed with no processing"""
+    resp = Response(generate_frames(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0, no-transform'
     resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    resp.headers['X-Accel-Buffering'] = 'no'
     return resp
 
-@app.route('/api/snapshots/list')
-def api_list_snapshots():
-    """List all saved snapshots with metadata."""
-    try:
-        snapshots_dir = _get_snapshots_dir()
-        snapshots = []
-
-        for filename in os.listdir(snapshots_dir):
-            if filename.endswith('.jpg') or filename.endswith('.jpeg'):
-                filepath = os.path.join(snapshots_dir, filename)
-                stat = os.stat(filepath)
-
-                # Parse motion detection info from filename
-                is_motion = '_motion_' in filename
-                motion_area = 0
-                if is_motion:
-                    try:
-                        parts = filename.split('_motion_')
-                        if len(parts) > 1:
-                            motion_area = int(parts[1].replace('px.jpg', ''))
-                    except Exception:
-                        pass
-
-                snapshots.append({
-                    'filename': filename,
-                    'timestamp': stat.st_mtime,
-                    'size': stat.st_size,
-                    'motion_detected': is_motion,
-                    'motion_area': motion_area,
-                    'url': f'/api/snapshots/image/{filename}'
-                })
-
-        # Sort by timestamp descending (newest first)
-        snapshots.sort(key=lambda x: x['timestamp'], reverse=True)
-
-        return jsonify({
-            'count': len(snapshots),
-            'snapshots': snapshots
-        })
-
-    except Exception as e:
-        logger.error(f"Failed to list snapshots: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/snapshots/image/<filename>')
-def api_get_snapshot(filename):
-    """Retrieve a specific snapshot image by filename."""
-    # Security: prevent directory traversal
-    if '..' in filename or '/' in filename or '\\' in filename:
-        return jsonify({"error": "Invalid filename"}), 400
-
-    try:
-        snapshots_dir = _get_snapshots_dir()
-        filepath = os.path.join(snapshots_dir, filename)
-
-        if not os.path.exists(filepath):
-            return jsonify({"error": "Snapshot not found"}), 404
-
-        return send_file(filepath, mimetype='image/jpeg')
-
-    except Exception as e:
-        logger.error(f"Failed to retrieve snapshot {filename}: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/snapshots/delete/<filename>', methods=['POST', 'DELETE'])
-def api_delete_snapshot(filename):
-    """Delete a specific snapshot by filename."""
-    # Security: prevent directory traversal
-    if '..' in filename or '/' in filename or '\\' in filename:
-        return jsonify({"error": "Invalid filename"}), 400
-
-    try:
-        snapshots_dir = _get_snapshots_dir()
-        filepath = os.path.join(snapshots_dir, filename)
-
-        if not os.path.exists(filepath):
-            return jsonify({"error": "Snapshot not found"}), 404
-
-        os.remove(filepath)
-        logger.info(f"Deleted snapshot: {filename}")
-
-        return jsonify({"success": True, "message": f"Deleted {filename}"})
-
-    except Exception as e:
-        logger.error(f"Failed to delete snapshot {filename}: {e}")
-        return jsonify({"error": str(e)}), 500
-
-# Video streaming routes removed - this is snapshot-only version
+@app.route('/video_feed_motion')
+def video_feed_motion():
+    """Video streaming route - motion detection overlay (alias)"""
+    resp = Response(generate_frames_with_detection(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0, no-transform'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    resp.headers['X-Accel-Buffering'] = 'no'
+    return resp
 
 
 def main():
     global APP_PORT
-    logger.info("Starting OpenSentry - SMV (Snapshot Motion Version)...")
+    logger.info("Starting OpenSentry camera server...")
     logger.info("Starting camera stream...")
     camera_stream.start()
     # Choose a port (default 5000). If busy, try the next few ports.
@@ -1257,7 +1272,7 @@ def main():
     APP_PORT = chosen
     logger.info("Binding HTTP server on port %d (preferred %d)", chosen, preferred)
     logger.info("Device ID: %s, Version: %s, mDNS: %s", str(DEVICE_ID), str(APP_VERSION), 'ENABLED' if not MDNS_DISABLE else 'DISABLED')
-    logger.info("Access the snapshot gallery at http://0.0.0.0:%d/", chosen)
+    logger.info("Access the feed at http://0.0.0.0:%d/video_feed", chosen)
     # Start mDNS advertisement after selecting the port
     try:
         _start_mdns_advertiser()

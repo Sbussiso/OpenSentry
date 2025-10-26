@@ -1,5 +1,4 @@
-# OpenSentry - SMV (Snapshot Motion Version) Dockerfile
-# Optimized for low-power devices like Raspberry Pi Zero W
+# OpenSentry Dockerfile (uv + Pi-ready)
 # Follows uv Docker guide patterns:
 # https://docs.astral.sh/uv/guides/integration/docker/
 
@@ -70,13 +69,10 @@ VOLUME ["/app/snapshots"]
 
 EXPOSE 5000
 
-# Defaults for runtime (snapshot-only mode)
+# Defaults for runtime
 ENV OPENSENTRY_PORT=5000 \
-    OPENSENTRY_SNAPSHOT_INTERVAL=10 \
-    OPENSENTRY_JPEG_QUALITY=75 \
-    GUNICORN_WORKERS=1 \
-    GUNICORN_WORKER_CLASS=sync \
-    GUNICORN_TIMEOUT=120 \
+    GUNICORN_WORKERS=2 \
+    GUNICORN_TIMEOUT=60 \
     OPENBLAS_NUM_THREADS=1 \
     OMP_NUM_THREADS=1 \
     OPENBLAS_CORETYPE=ARMV8
@@ -85,4 +81,4 @@ ENV OPENSENTRY_PORT=5000 \
 ENTRYPOINT []
 
 # Run the app via uv (uses the pre-synced project environment; --frozen prevents resolution)
-CMD ["sh", "-c", "uv run --frozen -m gunicorn -w ${GUNICORN_WORKERS:-1} -k ${GUNICORN_WORKER_CLASS:-sync} --timeout ${GUNICORN_TIMEOUT:-120} --bind 0.0.0.0:${OPENSENTRY_PORT:-5000} server:app"]
+CMD ["sh", "-c", "uv run --frozen -m gunicorn -w ${GUNICORN_WORKERS:-2} -k ${GUNICORN_WORKER_CLASS:-gevent} --timeout ${GUNICORN_TIMEOUT:-60} --bind 0.0.0.0:${OPENSENTRY_PORT:-5000} server:app"]

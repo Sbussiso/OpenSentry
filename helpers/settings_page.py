@@ -6,6 +6,8 @@ def render_settings_page(
     *,
     m_min_area: int,
     m_pad: int,
+    mog2_var_threshold: int,
+    mog2_history: int,
     raw_ok: bool,
     motion_ok: bool,
     device_id: str = '',
@@ -17,11 +19,18 @@ def render_settings_page(
     oauth2_client_id: str = '',
     oauth2_client_secret: str = '',
     oauth2_scope: str = 'openid profile email offline_access',
-    # Snapshot settings (snapshot-only mode)
-    snapshot_interval: int = 10,
-    snapshot_motion_detection: bool = True,
-    snapshot_retention_count: int = 100,
-    snapshot_retention_days: int = 7,
+    # Camera/stream tuning
+    cam_width: int = 0,
+    cam_height: int = 0,
+    cam_fps: int = 15,
+    cam_mjpeg: bool = True,
+    out_max_width: int = 960,
+    jpeg_quality: int = 75,
+    raw_fps: int = 15,
+    # Automatic snapshots
+    snapshot_enabled: bool = False,
+    snapshot_cooldown: int = 15,
+    snapshot_motion_threshold: int = 5000,
     snapshot_directory: str = 'snapshots',
 ) -> str:
     # OAuth2 settings
@@ -134,43 +143,81 @@ def render_settings_page(
             </fieldset>
             <form method=\"post\" action=\"/settings\">
                 <fieldset>
-                    <legend>Snapshot Settings (Interval-Based Capture)</legend>
+                    <legend>Camera &amp; Stream</legend>
                     <div class=\"md-grid\">
                         <label class=\"control\">
-                            <span class=\"control-title\">Capture interval (sec): <output id=\"snapshot_interval_out\">{snapshot_interval}</output></span>
-                            <input type=\"range\" name=\"snapshot_interval\" min=\"5\" max=\"60\" step=\"1\" value=\"{snapshot_interval}\" oninput=\"document.getElementById('snapshot_interval_out').textContent=this.value\">
+                            <span class=\"control-title\">Camera width (px)</span>
+                            <input type=\"number\" name=\"cam_width\" min=\"0\" step=\"1\" value=\"{cam_width}\"> 
                         </label>
                         <label class=\"control\">
-                            <span class=\"control-title\">Retention count: <output id=\"snapshot_retention_count_out\">{snapshot_retention_count}</output></span>
-                            <input type=\"range\" name=\"snapshot_retention_count\" min=\"10\" max=\"1000\" step=\"10\" value=\"{snapshot_retention_count}\" oninput=\"document.getElementById('snapshot_retention_count_out').textContent=this.value\">
+                            <span class=\"control-title\">Camera height (px)</span>
+                            <input type=\"number\" name=\"cam_height\" min=\"0\" step=\"1\" value=\"{cam_height}\"> 
                         </label>
                         <label class=\"control\">
-                            <span class=\"control-title\">Retention days: <output id=\"snapshot_retention_days_out\">{snapshot_retention_days}</output></span>
-                            <input type=\"range\" name=\"snapshot_retention_days\" min=\"1\" max=\"30\" step=\"1\" value=\"{snapshot_retention_days}\" oninput=\"document.getElementById('snapshot_retention_days_out').textContent=this.value\">
+                            <span class=\"control-title\">Camera FPS: <output id=\"cam_fps_out\">{cam_fps}</output></span>
+                            <input type=\"range\" name=\"cam_fps\" min=\"5\" max=\"60\" step=\"1\" value=\"{cam_fps}\" oninput=\"document.getElementById('cam_fps_out').textContent=this.value\">
+                        </label>
+                        <label class=\"control\">
+                            <span class=\"control-title\">MJPEG</span>
+                            <label><input type=\"checkbox\" name=\"cam_mjpeg\" { 'checked' if cam_mjpeg else '' }> Enable MJPEG</label>
+                        </label>
+                        <label class=\"control\">
+                            <span class=\"control-title\">JPEG quality: <output id=\"stream_jpeg_quality_out\">{jpeg_quality}</output></span>
+                            <input type=\"range\" name=\"stream_jpeg_quality\" min=\"30\" max=\"95\" step=\"1\" value=\"{jpeg_quality}\" oninput=\"document.getElementById('stream_jpeg_quality_out').textContent=this.value\">
+                        </label>
+                        <label class=\"control\">
+                            <span class=\"control-title\">Stream max width (px)</span>
+                            <input type=\"number\" name=\"stream_max_width\" min=\"320\" step=\"10\" value=\"{out_max_width}\"> 
+                        </label>
+                        <label class=\"control\">
+                            <span class=\"control-title\">Stream FPS: <output id=\"stream_raw_fps_out\">{raw_fps}</output></span>
+                            <input type=\"range\" name=\"stream_raw_fps\" min=\"5\" max=\"30\" step=\"1\" value=\"{raw_fps}\" oninput=\"document.getElementById('stream_raw_fps_out').textContent=this.value\">
+                        </label>
+                    </div>
+                    <p><small>Leave width/height 0 to use device defaults. Lower dimensions, quality, and FPS reduce CPU and latency.</small></p>
+                </fieldset>
+                <fieldset>
+                    <legend>Motion detection sensitivity</legend>
+                    <div class=\"md-grid\">
+                        <label class=\"control\">
+                            <span class=\"control-title\">Motion sensitivity: <output id=\"mog2_var_threshold_out\">{mog2_var_threshold}</output></span>
+                            <input type=\"range\" name=\"mog2_var_threshold\" min=\"8\" max=\"30\" step=\"1\" value=\"{mog2_var_threshold}\">
+                        </label>
+                        <label class=\"control\">
+                            <span class=\"control-title\">Learning period (frames): <output id=\"mog2_history_out\">{mog2_history}</output></span>
+                            <input type=\"range\" name=\"mog2_history\" min=\"200\" max=\"1000\" step=\"50\" value=\"{mog2_history}\">
+                        </label>
+                        <label class=\"control\">
+                            <span class=\"control-title\">Min area (px): <output id=\"md_min_area_out\">{m_min_area}</output></span>
+                            <input type=\"range\" name=\"md_min_area\" min=\"0\" max=\"50000\" step=\"100\" value=\"{m_min_area}\">
+                        </label>
+                        <label class=\"control\">
+                            <span class=\"control-title\">Box padding (px): <output id=\"md_pad_out\">{m_pad}</output></span>
+                            <input type=\"range\" name=\"md_pad\" min=\"0\" max=\"50\" step=\"1\" value=\"{m_pad}\">
+                        </label>
+                    </div>
+                    <p><small><strong>Motion sensitivity:</strong> Lower values (8-12) detect subtle movements, higher values (18-30) reduce false positives. <strong>Learning period:</strong> How many frames to build background model (200-500 for fast adaptation, 500-1000 for stable scenes).</small></p>
+                </fieldset>
+                <fieldset>
+                    <legend>Automatic Snapshots</legend>
+                    <div style=\"margin-bottom:12px;\">
+                        <label><input type=\"checkbox\" name=\"snapshot_enabled\" {'checked' if snapshot_enabled else ''}> Enable automatic snapshots on motion</label>
+                    </div>
+                    <div class=\"md-grid\">
+                        <label class=\"control\">
+                            <span class=\"control-title\">Cooldown period (sec): <output id=\"snapshot_cooldown_out\">{snapshot_cooldown}</output></span>
+                            <input type=\"range\" name=\"snapshot_cooldown\" min=\"5\" max=\"60\" step=\"1\" value=\"{snapshot_cooldown}\">
+                        </label>
+                        <label class=\"control\">
+                            <span class=\"control-title\">Motion threshold (px): <output id=\"snapshot_motion_threshold_out\">{snapshot_motion_threshold}</output></span>
+                            <input type=\"range\" name=\"snapshot_motion_threshold\" min=\"1000\" max=\"20000\" step=\"500\" value=\"{snapshot_motion_threshold}\">
                         </label>
                         <label class=\"control\" style=\"grid-column: 1 / -1;\">
                             <span class=\"control-title\">Snapshots directory</span>
                             <input type=\"text\" name=\"snapshot_directory\" value=\"{snapshot_directory}\" style=\"width:100%;\">
                         </label>
                     </div>
-                    <div style=\"margin-top:12px;\">
-                        <label><input type=\"checkbox\" name=\"snapshot_motion_detection\" {'checked' if snapshot_motion_detection else ''}> Enable motion detection overlay on snapshots</label>
-                    </div>
-                    <p><small><strong>Capture interval:</strong> Time between snapshots (5-60 seconds). <strong>Retention:</strong> Keep last N snapshots or X days (whichever limit is hit first). Motion detection adds green boxes around detected movement.</small></p>
-                </fieldset>
-                <fieldset>
-                    <legend>Motion Detection Settings</legend>
-                    <div class=\"md-grid\">
-                        <label class=\"control\">
-                            <span class=\"control-title\">Min area (px): <output id=\"md_min_area_out\">{m_min_area}</output></span>
-                            <input type=\"range\" name=\"md_min_area\" min=\"0\" max=\"50000\" step=\"100\" value=\"{m_min_area}\" oninput=\"document.getElementById('md_min_area_out').textContent=this.value\">
-                        </label>
-                        <label class=\"control\">
-                            <span class=\"control-title\">Box padding (px): <output id=\"md_pad_out\">{m_pad}</output></span>
-                            <input type=\"range\" name=\"md_pad\" min=\"0\" max=\"50\" step=\"1\" value=\"{m_pad}\" oninput=\"document.getElementById('md_pad_out').textContent=this.value\">
-                        </label>
-                    </div>
-                    <p><small><strong>Min area:</strong> Minimum contour size to detect as motion (higher = less sensitive, fewer false positives). <strong>Padding:</strong> Pixels added around detected motion boxes. Uses lightweight frame differencing for low CPU usage.</small></p>
+                    <p><small><strong>Cooldown:</strong> Minimum time between snapshots to prevent spam. <strong>Motion threshold:</strong> Minimum total motion area to trigger snapshot (higher = only significant motion). Snapshots saved to directory with timestamp filename.</small></p>
                 </fieldset>
                 <p><button type=\"submit\">Save</button></p>
             </form>
@@ -190,8 +237,9 @@ def render_settings_page(
                 input.addEventListener('input', update);
                 update();
             }}
-            ['md_min_area','md_pad'].forEach(bind);
-            ['snapshot_interval','snapshot_retention_count','snapshot_retention_days'].forEach(bind);
+            ['mog2_var_threshold','mog2_history','md_min_area','md_pad'].forEach(bind);
+            ['cam_fps','stream_jpeg_quality','stream_raw_fps'].forEach(bind);
+            ['snapshot_cooldown','snapshot_motion_threshold'].forEach(bind);
 
             // OAuth2 settings toggle
             var authModeRadios = document.querySelectorAll('input[name="auth_mode"]');

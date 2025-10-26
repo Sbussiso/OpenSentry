@@ -16,6 +16,8 @@ def save_config(
     motion_detection: Dict[str, Any],
     device_id: str | None = None,
     auth_config: Dict[str, Any] | None = None,
+    video_config: Dict[str, Any] | None = None,
+    stream_config: Dict[str, Any] | None = None,
     snapshot_config: Dict[str, Any] | None = None,
 ) -> None:
     """Save config to JSON, preserving existing top-level keys like device_id.
@@ -39,6 +41,11 @@ def save_config(
         obj['device_id'] = device_id
     if auth_config is not None:
         obj['auth'] = auth_config
+    # Optional sections
+    if video_config is not None:
+        obj['video'] = {**video_config}
+    if stream_config is not None:
+        obj['stream'] = {**stream_config}
     if snapshot_config is not None:
         obj['snapshots'] = {**snapshot_config}
 
