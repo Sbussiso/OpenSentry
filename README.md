@@ -1,4 +1,4 @@
-# OpenSentry
+# OpenSentry - LMV (Live Motion Version)
 
 **Turn any Linux device with a camera into a motion detection security system you control.**
 
@@ -10,9 +10,9 @@ Self-hosted. Privacy-first. No cloud required.
 
 ---
 
-## 🎯 What is OpenSentry?
+## 🎯 What is OpenSentry - LMV?
 
-OpenSentry transforms any Linux device with a webcam into a motion detection security camera. Stream live video with motion detection overlays — all processed locally on your hardware.
+OpenSentry - LMV transforms any Linux device with a webcam into a motion detection security camera. Stream live video with motion detection overlays — all processed locally on your hardware.
 
 ### Key Features
 
