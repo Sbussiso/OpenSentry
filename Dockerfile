@@ -63,6 +63,10 @@ ENV PATH="/app/.venv/bin:${PATH}"
 # Some uv base variants install python at /usr/local/bin/python3 only.
 RUN ln -sf /usr/local/bin/python3 /usr/bin/python3.12 || true
 
+# Create snapshots directory and declare as volume for persistence
+RUN mkdir -p /app/snapshots
+VOLUME ["/app/snapshots"]
+
 EXPOSE 5000
 
 # Defaults for runtime

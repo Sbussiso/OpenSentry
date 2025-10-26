@@ -4,18 +4,12 @@ from helpers.theme import get_css, header_html
 
 def render_settings_page(
     *,
-    names: List[str],
-    select_all_flag: bool,
-    selected: Set[str],
-    m_thresh: int,
     m_min_area: int,
-    m_kernel: int,
-    m_iters: int,
     m_pad: int,
+    mog2_var_threshold: int,
+    mog2_history: int,
     raw_ok: bool,
     motion_ok: bool,
-    objects_ok: bool,
-    unknowns: list = [],
     device_id: str = '',
     port: int = 5000,
     mdns_enabled: bool = True,
@@ -33,18 +27,12 @@ def render_settings_page(
     out_max_width: int = 960,
     jpeg_quality: int = 75,
     raw_fps: int = 15,
+    # Automatic snapshots
+    snapshot_enabled: bool = False,
+    snapshot_cooldown: int = 15,
+    snapshot_motion_threshold: int = 5000,
+    snapshot_directory: str = 'snapshots',
 ) -> str:
-    options_html = ''
-    if names:
-        for n in names:
-            checked = 'checked' if (n in selected and not select_all_flag) else ''
-            options_html += f'<label><input type="checkbox" name="classes" value="{n}" {checked}> {n}</label>'
-    else:
-        options_html = '<p><em>YOLO classes unavailable. Install ultralytics and restart to configure.</em></p>'
-
-    select_all_checked = 'checked' if select_all_flag else ''
-    
-
     # OAuth2 settings
     auth_mode_local_checked = 'checked' if auth_mode == 'local' else ''
     auth_mode_oauth2_checked = 'checked' if auth_mode == 'oauth2' else ''
@@ -53,44 +41,11 @@ def render_settings_page(
     raw_text = 'Active' if raw_ok else 'Down'
     motion_class = 'ok' if motion_ok else 'down'
     motion_text = 'Active' if motion_ok else 'Down'
-    objects_class = 'ok' if objects_ok else 'down'
-    objects_text = 'Active' if objects_ok else 'Down'
-    
-
-    # Build unknowns management HTML
-    unknowns_html = ''
-    if unknowns:
-        cards = []
-        for u in unknowns:
-            uid = u.get('uid', '')
-            ts = u.get('ts', '')
-            img_url = u.get('img_url', '')
-            cards.append(f"""
-            <div class=\"card\">
-              <div class=\"img\"><img src=\"{img_url}\" alt=\"{uid}\"/></div>
-              <div class=\"meta\"><div><strong>{uid}</strong></div><div>{ts}</div></div>
-              <form method=\"post\" action=\"/settings\" class=\"actions\">
-                <input type=\"hidden\" name=\"uid\" value=\"{uid}\"> 
-                <input type=\"text\" name=\"name\" placeholder=\"Name\" />
-                <button type=\"submit\" name=\"action\" value=\"promote_unknown\">Promote to Known</button>
-                <button type=\"submit\" name=\"action\" value=\"delete_unknown\" onclick=\"return confirm('Delete this snapshot and entry?');\">Delete</button>
-              </form>
-            </div>
-            """)
-        unknowns_html = f"""
-        <fieldset>
-          <legend>Manage Unknown IDs</legend>
-          <div class=\"unknowns-grid\">{''.join(cards)}</div>
-          <p><small>Promote a UID to a known name. Promoting moves the embedding to the Known list so future matches display the name.</small></p>
-        </fieldset>
-        """
 
     css = get_css() + """
             .form-wrap { max-width: 1040px; margin: 0 auto; padding: 16px; }
             fieldset { border: 1px solid var(--border); background: var(--surface); border-radius: 10px; padding: 14px; margin-top: 14px; }
             legend { color: var(--muted); }
-            .options-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px 16px; align-items: center; }
-            .options-grid label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
             .status-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px 14px; align-items: center; }
             .status-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background:#0e131b; }
             .pill { padding: 2px 10px; border-radius: 12px; font-weight: 600; font-size: 0.9em; border: 1px solid transparent; }
@@ -101,16 +56,10 @@ def render_settings_page(
             .md-grid .control .control-title { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; color: var(--muted); }
             .md-grid .control output { font-variant-numeric: tabular-nums; min-width: 3ch; text-align: right; color: var(--text); }
             input[type=range] { width: 100%; accent-color: var(--accent); }
-            input[type=text] { background:#0e131b; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 10px; }
+            input[type=text], input[type=number] { background:#0e131b; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 10px; }
             input[type=checkbox], input[type=radio] { accent-color: var(--accent); }
             button { background: var(--accent); color:#fff; border:0; padding:8px 12px; border-radius:8px; font-weight:600; cursor:pointer; }
             button:hover { filter: brightness(1.05); }
-            .unknowns-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap:12px; }
-            .unknowns-grid .card { border:1px solid var(--border); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; background:#0e131b; }
-            .unknowns-grid .img img { width:100%; display:block; }
-            .unknowns-grid .meta { padding:8px; display:flex; justify-content:space-between; align-items:center; color:var(--muted); }
-            .unknowns-grid .actions { display:flex; gap:8px; padding:8px; align-items:center; border-top:1px solid var(--border); flex-wrap: wrap; }
-            .unknowns-grid .actions input[type=text] { flex: 1 1 240px; min-width: 240px; padding:8px; font-size: 14px; }
             .auth-mode-options { display:flex; gap:16px; margin:12px 0; }
             .oauth2-fields { display:grid; gap:12px; margin-top:12px; }
             .oauth2-fields label { display:flex; flex-direction:column; gap:4px; }
@@ -120,7 +69,7 @@ def render_settings_page(
             #oauth2_test_result.success { background:rgba(22,163,74,0.15); color:#86efac; border:1px solid rgba(22,163,74,0.35); }
             #oauth2_test_result.error { background:rgba(239,68,68,0.15); color:#fecaca; border:1px solid rgba(239,68,68,0.35); }
     """
-    hdr = header_html('Settings')
+    hdr = header_html('Settings - Motion Detection Camera')
 
     return f"""
     <!DOCTYPE html>
@@ -190,12 +139,9 @@ def render_settings_page(
                 <div class=\"status-grid\">
                     <div class=\"status-item\"><span>Raw feed</span><span class=\"pill {raw_class}\">{raw_text}</span></div>
                     <div class=\"status-item\"><span>Motion detection</span><span class=\"pill {motion_class}\">{motion_text}</span></div>
-                    <div class=\"status-item\"><span>Object detection</span><span class=\"pill {objects_class}\">{objects_text}</span></div>
-                    
                 </div>
             </fieldset>
-            <form method=\"post\" action=\"/settings\"> 
-                <p><label><input type=\"checkbox\" name=\"select_all\" value=\"1\" {select_all_checked}> Detect all classes</label></p>
+            <form method=\"post\" action=\"/settings\">
                 <fieldset>
                     <legend>Camera &amp; Stream</legend>
                     <div class=\"md-grid\">
@@ -231,34 +177,47 @@ def render_settings_page(
                     <p><small>Leave width/height 0 to use device defaults. Lower dimensions, quality, and FPS reduce CPU and latency.</small></p>
                 </fieldset>
                 <fieldset>
-                    <legend>Select classes (if not detecting all):</legend>
-                    <div class=\"options-grid\">{options_html}</div>
-                </fieldset>
-                <fieldset>
-                <fieldset>
                     <legend>Motion detection sensitivity</legend>
                     <div class=\"md-grid\">
                         <label class=\"control\">
-                            <span class=\"control-title\">Pixel threshold: <output id=\"md_threshold_out\">{m_thresh}</output></span>
-                            <input type=\"range\" name=\"md_threshold\" min=\"0\" max=\"255\" step=\"1\" value=\"{m_thresh}\">
+                            <span class=\"control-title\">Motion sensitivity: <output id=\"mog2_var_threshold_out\">{mog2_var_threshold}</output></span>
+                            <input type=\"range\" name=\"mog2_var_threshold\" min=\"8\" max=\"30\" step=\"1\" value=\"{mog2_var_threshold}\">
+                        </label>
+                        <label class=\"control\">
+                            <span class=\"control-title\">Learning period (frames): <output id=\"mog2_history_out\">{mog2_history}</output></span>
+                            <input type=\"range\" name=\"mog2_history\" min=\"200\" max=\"1000\" step=\"50\" value=\"{mog2_history}\">
                         </label>
                         <label class=\"control\">
                             <span class=\"control-title\">Min area (px): <output id=\"md_min_area_out\">{m_min_area}</output></span>
                             <input type=\"range\" name=\"md_min_area\" min=\"0\" max=\"50000\" step=\"100\" value=\"{m_min_area}\">
                         </label>
                         <label class=\"control\">
-                            <span class=\"control-title\">Dilation kernel (px): <output id=\"md_kernel_out\">{m_kernel}</output></span>
-                            <input type=\"range\" name=\"md_kernel\" min=\"1\" max=\"41\" step=\"2\" value=\"{m_kernel}\">
-                        </label>
-                        <label class=\"control\">
-                            <span class=\"control-title\">Dilation iterations: <output id=\"md_iterations_out\">{m_iters}</output></span>
-                            <input type=\"range\" name=\"md_iterations\" min=\"0\" max=\"5\" step=\"1\" value=\"{m_iters}\">
-                        </label>
-                        <label class=\"control\">
                             <span class=\"control-title\">Box padding (px): <output id=\"md_pad_out\">{m_pad}</output></span>
                             <input type=\"range\" name=\"md_pad\" min=\"0\" max=\"50\" step=\"1\" value=\"{m_pad}\">
                         </label>
                     </div>
+                    <p><small><strong>Motion sensitivity:</strong> Lower values (8-12) detect subtle movements, higher values (18-30) reduce false positives. <strong>Learning period:</strong> How many frames to build background model (200-500 for fast adaptation, 500-1000 for stable scenes).</small></p>
+                </fieldset>
+                <fieldset>
+                    <legend>Automatic Snapshots</legend>
+                    <div style=\"margin-bottom:12px;\">
+                        <label><input type=\"checkbox\" name=\"snapshot_enabled\" {'checked' if snapshot_enabled else ''}> Enable automatic snapshots on motion</label>
+                    </div>
+                    <div class=\"md-grid\">
+                        <label class=\"control\">
+                            <span class=\"control-title\">Cooldown period (sec): <output id=\"snapshot_cooldown_out\">{snapshot_cooldown}</output></span>
+                            <input type=\"range\" name=\"snapshot_cooldown\" min=\"5\" max=\"60\" step=\"1\" value=\"{snapshot_cooldown}\">
+                        </label>
+                        <label class=\"control\">
+                            <span class=\"control-title\">Motion threshold (px): <output id=\"snapshot_motion_threshold_out\">{snapshot_motion_threshold}</output></span>
+                            <input type=\"range\" name=\"snapshot_motion_threshold\" min=\"1000\" max=\"20000\" step=\"500\" value=\"{snapshot_motion_threshold}\">
+                        </label>
+                        <label class=\"control\" style=\"grid-column: 1 / -1;\">
+                            <span class=\"control-title\">Snapshots directory</span>
+                            <input type=\"text\" name=\"snapshot_directory\" value=\"{snapshot_directory}\" style=\"width:100%;\">
+                        </label>
+                    </div>
+                    <p><small><strong>Cooldown:</strong> Minimum time between snapshots to prevent spam. <strong>Motion threshold:</strong> Minimum total motion area to trigger snapshot (higher = only significant motion). Snapshots saved to directory with timestamp filename.</small></p>
                 </fieldset>
                 <p><button type=\"submit\">Save</button></p>
             </form>
@@ -278,8 +237,9 @@ def render_settings_page(
                 input.addEventListener('input', update);
                 update();
             }}
-            ['md_threshold','md_min_area','md_kernel','md_iterations','md_pad'].forEach(bind);
+            ['mog2_var_threshold','mog2_history','md_min_area','md_pad'].forEach(bind);
             ['cam_fps','stream_jpeg_quality','stream_raw_fps'].forEach(bind);
+            ['snapshot_cooldown','snapshot_motion_threshold'].forEach(bind);
 
             // OAuth2 settings toggle
             var authModeRadios = document.querySelectorAll('input[name="auth_mode"]');

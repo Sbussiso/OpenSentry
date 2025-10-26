@@ -3,54 +3,75 @@ from helpers.theme import get_css, header_html
 def render_index_page() -> str:
     css = get_css() + """
     .wrap { display:flex; align-items:center; justify-content:center; padding:32px 16px; }
-    .card { width:100%; max-width:720px; background: var(--surface); border:1px solid var(--border); border-radius:12px; padding:20px 22px; box-shadow:0 6px 30px rgba(0,0,0,0.35); }
-    h1 { margin:0 0 6px; font-size:22px; }
-    p.lead { margin:0 0 16px; color: var(--muted); }
-    .grid { display:grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); --gap: 12px; gap: var(--gap); align-items: stretch; }
-    .tile { border:1px solid var(--border); border-radius:8px; padding:14px; background:#0e131b; }
-    .tile h3 { margin:0 0 8px; font-size:16px; }
-    .btns a { display:inline-block; margin-right:10px; margin-top:8px; padding:8px 12px; border-radius:8px; background:var(--accent); color:#fff; font-weight:600; }
-    .btns a.secondary { background: transparent; border:1px solid var(--border); color: var(--text); }
-    @media (max-width: 599px) {
-      .grid { grid-template-columns: 1fr; }
-      .tile.objects { grid-column: auto; justify-self: stretch; max-width: none; }
-    }
-    @media (min-width: 600px) {
-      .tile.objects { grid-column: 1 / -1; justify-self: center; width: 100%; max-width: calc((100% - var(--gap)) / 2); }
-    }
+    .card { width:100%; max-width:960px; background: var(--surface); border:1px solid var(--border); border-radius:12px; padding:20px 22px; box-shadow:0 6px 30px rgba(0,0,0,0.35); }
+    h1 { margin:0 0 16px; font-size:22px; text-align: center; }
+    .video-container { width:100%; border-radius:8px; overflow:hidden; border:1px solid var(--border); background:#000; margin-bottom:16px; }
+    .video-container img { width:100%; height:auto; display:block; }
+    .controls { display:flex; justify-content:center; gap:12px; }
+    .btn { background: var(--accent); color:#fff; border:0; padding:10px 20px; border-radius:8px; font-weight:600; cursor:pointer; font-size:14px; }
+    .btn:hover { filter: brightness(1.1); }
+    .btn:disabled { opacity:0.5; cursor:not-allowed; }
     """
-    hdr = header_html("OpenSentry")
+    hdr = header_html("OpenSentry - Motion Detection Camera")
     return f"""
     <!DOCTYPE html>
     <html lang=\"en\">
     <head>
         <meta charset=\"utf-8\">
         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
-        <title>OpenSentry</title>
+        <title>OpenSentry - Motion Detection Camera</title>
         <style>{css}</style>
     </head>
     <body>
         {hdr}
-        <div class=\"wrap\"> 
-            <div class=\"card\"> 
-                <h1>Streams</h1>
-                <p class=\"lead\">Open a stream in a new tab.</p>
-                <div class=\"grid\"> 
-                    <div class=\"tile\"> 
-                        <h3>Raw</h3>
-                        <div class=\"btns\"><a href=\"/video_feed\" target=\"_blank\" rel=\"noopener\">Open</a></div>
-                    </div>
-                    <div class=\"tile\"> 
-                        <h3>Motion</h3>
-                        <div class=\"btns\"><a href=\"/video_feed_motion\" target=\"_blank\" rel=\"noopener\">Open</a></div>
-                    </div>
-                    <div class=\"tile objects\"> 
-                        <h3>Objects</h3>
-                        <div class=\"btns\"><a href=\"/video_feed_objects\" target=\"_blank\" rel=\"noopener\">Open</a></div>
-                    </div>
+        <div class=\"wrap\">
+            <div class=\"card\">
+                <h1>OpenSentry Feed</h1>
+                <div class=\"video-container\">
+                    <img src=\"/video_feed_motion\" alt=\"Motion Detection Feed\" />
+                </div>
+                <div class=\"controls\">
+                    <button class=\"btn\" id=\"snapshot-btn\" onclick=\"captureSnapshot()\">Take Snapshot</button>
                 </div>
             </div>
         </div>
+        <script>
+        async function captureSnapshot() {{
+            const btn = document.getElementById('snapshot-btn');
+            btn.disabled = true;
+            btn.textContent = 'Capturing...';
+
+            try {{
+                const response = await fetch('/api/snapshot');
+                if (!response.ok) {{
+                    throw new Error('Failed to capture snapshot');
+                }}
+
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'opensentry-snapshot-' + new Date().toISOString().replace(/[:.]/g, '-') + '.jpg';
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+
+                btn.textContent = 'Snapshot Saved!';
+                setTimeout(() => {{
+                    btn.textContent = 'Take Snapshot';
+                    btn.disabled = false;
+                }}, 2000);
+            }} catch (err) {{
+                console.error('Snapshot error:', err);
+                btn.textContent = 'Error - Try Again';
+                setTimeout(() => {{
+                    btn.textContent = 'Take Snapshot';
+                    btn.disabled = false;
+                }}, 2000);
+            }}
+        }}
+        </script>
     </body>
     </html>
     """

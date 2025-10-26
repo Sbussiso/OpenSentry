@@ -14,10 +14,8 @@ from flask import Flask, Response, request, redirect, url_for, send_file, abort,
 from io import BytesIO
 import cv2
 from helpers.camera import CameraStream
-from helpers.yolo import get_yolo_model
 from helpers.settings_page import render_settings_page
 from helpers.index_page import render_index_page
-from helpers.all_feeds_page import render_all_feeds_page
 from helpers.theme import get_css, header_html
 from helpers.mdns import MdnsAdvertiser
 from helpers.encoders import init_jpeg_encoder, encode_jpeg_bgr
@@ -500,17 +498,15 @@ def status():
     has_frame = (camera_stream.get_frame() is not None)
     raw_ok = camera_stream.running and has_frame
     motion_ok = raw_ok
-    objects_ok = True  # advertised capability; heavy check avoided here
     data = {
         'id': DEVICE_ID,
         'name': DEVICE_NAME,
         'version': APP_VERSION,
         'port': APP_PORT,
-        'caps': ['raw','motion','objects'],
+        'caps': ['raw','motion'],
         'routes': {
             'raw': bool(raw_ok),
             'motion': bool(motion_ok),
-            'objects': bool(objects_ok),
         },
         'camera': {
             'running': bool(camera_stream.running),
@@ -607,57 +603,29 @@ def _apply_video_stream_settings():
     except Exception:
         pass
 
-# Object/face detection throttles (env-tunable)
-OBJECTS_ENABLED = os.environ.get('OPENSENTRY_OBJECTS_ENABLED', '1') in ('1', 'true', 'TRUE')
-try:
-    OBJECTS_FPS = int(os.environ.get('OPENSENTRY_OBJECTS_FPS', '2'))
-except Exception:
-    OBJECTS_FPS = 2
-try:
-    OBJECTS_IMGSZ = int(os.environ.get('OPENSENTRY_OBJECTS_IMGSZ', '480'))
-except Exception:
-    OBJECTS_IMGSZ = 480
-
- 
-
-# (YOLO is now handled in helpers.yolo; face_recognition is used via helpers.face_dedup)
-
-# Object detection settings (thread-safe)
+# Thread-safe settings lock
 settings_lock = threading.Lock()
-object_detection_config = {
-    'select_all': True,   # when True, detect all classes
-    'classes': set(),     # when select_all is False, detect only these class names
-}
 
 # Motion detection defaults and settings (thread-safe, in-memory)
 MOTION_DEFAULTS = {
-    'threshold': 25,   # pixel diff threshold; lower = more sensitive
-    'min_area': 500,   # minimum contour area (pixels)
-    'kernel': 15,      # dilation kernel (px)
-    'iterations': 2,   # dilation iterations
-    'pad': 10,         # box padding (px)
+    'threshold': 25,           # [DEPRECATED] pixel diff threshold (kept for compatibility)
+    'min_area': 500,           # minimum contour area (pixels)
+    'kernel': 15,              # [DEPRECATED] dilation kernel (kept for compatibility)
+    'iterations': 2,           # [DEPRECATED] dilation iterations (kept for compatibility)
+    'pad': 10,                 # box padding (px)
+    'mog2_var_threshold': 16,  # MOG2 variance threshold (8-30, lower = more sensitive)
+    'mog2_history': 500,       # MOG2 learning history (frames, ~30 sec @ 15fps)
 }
 motion_detection_config = MOTION_DEFAULTS.copy()
 
-# Face detection defaults and settings (in-memory)
-FACE_DEFAULTS = {
-    'archive_unknown': False,      # when True, archive snapshot of unknown faces
-    'min_duration_sec': 15,        # how long a face must persist before archiving
-    'archive_dir': os.path.join(BASE_DIR, 'archives', 'unknown_faces'),
-    # Dedup config
-    'dedup_enabled': True,
-    'dedup_threshold': 10,         # Hamming distance threshold (0-64)
-    'manifest_path': os.path.join(BASE_DIR, 'archives', 'unknown_faces', 'manifest.json'),
-    'dedup_method': 'embedding',   # 'embedding' or 'phash'
-    'embedding_threshold': 0.7,    # L2 distance threshold for embeddings
-    'manifest_embed_path': os.path.join(BASE_DIR, 'archives', 'unknown_faces', 'manifest_embeddings.json'),
-    'cooldown_minutes': 0,
+# Automatic snapshot defaults and settings
+SNAPSHOT_DEFAULTS = {
+    'enabled': False,          # Enable automatic snapshots on motion
+    'cooldown': 15,            # Minimum seconds between snapshots (5-60)
+    'motion_threshold': 5000,  # Minimum total motion area (pixels) to trigger
+    'directory': 'snapshots',  # Directory to save snapshots (relative to BASE_DIR)
 }
-face_detection_config = FACE_DEFAULTS.copy()
-# Face dedup utilities moved to helpers.face_dedup
-
-# Known faces manifest path
-KNOWN_EMBED_PATH = os.path.join(BASE_DIR, 'archives', 'known_faces', 'manifest_embeddings.json')
+snapshot_config = SNAPSHOT_DEFAULTS.copy()
 
 # Persisted config path
 CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
@@ -669,15 +637,8 @@ DEVICE_ID = None
 if _cfg:
     try:
         with settings_lock:
-            if 'object_detection' in _cfg:
-                object_detection_config.update(_cfg['object_detection'])
-                # classes back to set
-                if isinstance(object_detection_config.get('classes', set()), list):
-                    object_detection_config['classes'] = set(object_detection_config['classes'])
             if 'motion_detection' in _cfg:
                 motion_detection_config.update(_cfg['motion_detection'])
-            if 'face_detection' in _cfg:
-                face_detection_config.update(_cfg['face_detection'])
             # Load auth config if present
             if 'auth' in _cfg and isinstance(_cfg['auth'], dict):
                 auth_config.update(_cfg['auth'])
@@ -689,6 +650,9 @@ if _cfg:
                     stream_config.update(_cfg['stream'])
             except Exception:
                 pass
+            # Load snapshot config if present
+            if 'snapshots' in _cfg and isinstance(_cfg['snapshots'], dict):
+                snapshot_config.update(_cfg['snapshots'])
             # read existing device_id if present
             DEVICE_ID = _cfg.get('device_id') if isinstance(_cfg, dict) else None
         # Apply loaded video/stream settings (updates env and camera)
@@ -704,9 +668,18 @@ if not DEVICE_ID:
     DEVICE_ID = uuid.uuid4().hex[:12]
     try:
         with settings_lock:
-            _save_config(CONFIG_PATH, object_detection_config, motion_detection_config, face_detection_config, device_id=DEVICE_ID)
+            _save_config(CONFIG_PATH, motion_detection_config, device_id=DEVICE_ID)
     except Exception:
         pass
+
+# Ensure snapshots directory exists
+def _get_snapshots_dir() -> str:
+    """Get the full path to the snapshots directory and ensure it exists."""
+    with settings_lock:
+        rel_path = snapshot_config.get('directory', 'snapshots')
+    full_path = os.path.join(BASE_DIR, rel_path)
+    os.makedirs(full_path, exist_ok=True)
+    return full_path
 
 # Global camera stream (class imported from helpers.camera)
 camera_stream = CameraStream()
@@ -763,7 +736,7 @@ def _start_mdns_advertiser():
             'id': DEVICE_ID,
             'name': DEVICE_NAME,
             'ver': APP_VERSION,
-            'caps': 'raw,motion,objects',
+            'caps': 'raw,motion',
             'auth': 'token' if API_TOKEN else 'session',
             'api': '/status,/health',
             'path': '/',
@@ -805,100 +778,6 @@ raw_broadcaster = Broadcaster(
 )
 
 
-class _ObjectsWorker:
-    def __init__(self):
-        self._th = None
-        self._running = False
-        self._lock = threading.Lock()
-        self._latest: bytes | None = None
-
-    def start(self):
-        if self._running:
-            return
-        self._running = True
-        self._th = threading.Thread(target=self._run, name='ObjectsWorker', daemon=True)
-        self._th.start()
-
-    def stop(self):
-        self._running = False
-
-    def get_latest(self) -> bytes | None:
-        with self._lock:
-            return self._latest
-
-    def _run(self):
-        last_inf = 0.0
-        while self._running:
-            frame = camera_stream.get_frame()
-            if frame is None:
-                time.sleep(0.05)
-                continue
-            # Prepare base frame (downscale after overlay to preserve label clarity)
-            draw_frame = frame.copy()
-
-            if not OBJECTS_ENABLED:
-                cv2.putText(draw_frame, 'Objects disabled (OPENSENTRY_OBJECTS_ENABLED=1)', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-            else:
-                model = get_yolo_model()
-                if model is None:
-                    cv2.putText(draw_frame, 'YOLOv8n unavailable. Install ultralytics', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                else:
-                    try:
-                        now_ts = time.time()
-                        min_int = 1.0 / max(1, int(OBJECTS_FPS or 1))
-                        if (now_ts - last_inf) >= min_int:
-                            results = model(draw_frame, imgsz=int(OBJECTS_IMGSZ), verbose=False)[0]
-                            last_inf = now_ts
-                        else:
-                            results = None
-                        names = getattr(results, 'names', {}) or getattr(model, 'names', {}) or {}
-                        if results is not None and hasattr(results, 'boxes') and results.boxes is not None:
-                            # Snapshot class filter settings
-                            with settings_lock:
-                                select_all = object_detection_config['select_all']
-                                allowed = set(object_detection_config['classes'])
-                            for b in results.boxes:
-                                try:
-                                    xyxy = b.xyxy[0].cpu().numpy().tolist()
-                                    x1, y1, x2, y2 = [int(v) for v in xyxy]
-                                    conf = float(b.conf[0]) if getattr(b, 'conf', None) is not None else 0.0
-                                    cls_id = int(b.cls[0]) if getattr(b, 'cls', None) is not None else -1
-                                    label = names.get(cls_id, str(cls_id if cls_id >= 0 else 'obj'))
-                                    if not select_all and label not in allowed:
-                                        continue
-                                    color = (0, 255, 255)
-                                    cv2.rectangle(draw_frame, (x1, y1), (x2, y2), color, 2)
-                                    text = f"{label} {conf:.2f}"
-                                    cv2.putText(draw_frame, text, (x1, max(20, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                                except Exception:
-                                    continue
-                    except Exception as e:
-                        cv2.putText(draw_frame, f'YOLO error: {e}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
-            # Downscale for output if needed
-            H, W = draw_frame.shape[:2]
-            if W > OUTPUT_MAX_WIDTH:
-                scale = OUTPUT_MAX_WIDTH / float(W)
-                draw_frame = cv2.resize(draw_frame, (int(W * scale), int(H * scale)), interpolation=cv2.INTER_AREA)
-
-            jpg = encode_jpeg_bgr(draw_frame, JPEG_QUALITY)
-            with self._lock:
-                self._latest = jpg
-
-            # Maintain objects FPS pacing even if broadcaster polls faster
-            per = 1.0 / max(1, int(OBJECTS_FPS or 1))
-            time.sleep(per * 0.9)
-
-
-_objects_worker = _ObjectsWorker()
-
-objects_broadcaster = Broadcaster(
-    name='objects',
-    produce_fn=lambda: _objects_worker.get_latest(),
-    fps_getter=lambda: int(stream_config.get('raw_fps', RAW_TARGET_FPS)),
-)
-
-
 class _MotionWorker:
     def __init__(self):
         self._th = None
@@ -907,6 +786,9 @@ class _MotionWorker:
         self._latest: bytes | None = None
         self._prev_small = None
         self._proc_scale = 0.5
+        self._bg_subtractor = None  # MOG2 background subtractor
+        self._mog2_params = None  # Track current MOG2 parameters (var_threshold, history)
+        self._last_snapshot_time = 0  # Track last automatic snapshot time (epoch seconds)
 
     def start(self):
         if self._running:
@@ -921,6 +803,45 @@ class _MotionWorker:
     def get_latest(self) -> bytes | None:
         with self._lock:
             return self._latest
+
+    def _maybe_save_snapshot(self, frame, contours, min_area: int):
+        """Save automatic snapshot if conditions are met."""
+        import time
+
+        # Check if automatic snapshots are enabled
+        with settings_lock:
+            enabled = snapshot_config.get('enabled', False)
+            if not enabled:
+                return
+
+            cooldown = int(snapshot_config.get('cooldown', 15))
+            motion_threshold = int(snapshot_config.get('motion_threshold', 5000))
+
+        # Check cooldown period
+        current_time = time.time()
+        if current_time - self._last_snapshot_time < cooldown:
+            return
+
+        # Calculate total motion area
+        total_motion_area = sum(cv2.contourArea(c) for c in contours if cv2.contourArea(c) >= min_area)
+
+        # Check if motion exceeds threshold
+        if total_motion_area < motion_threshold:
+            return
+
+        # Save snapshot
+        try:
+            from datetime import datetime
+            snapshots_dir = _get_snapshots_dir()
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            filename = f"{timestamp}_motion.jpg"
+            filepath = os.path.join(snapshots_dir, filename)
+
+            cv2.imwrite(filepath, frame)
+            self._last_snapshot_time = current_time
+            logger.info(f"Automatic snapshot saved: {filename} (motion area: {total_motion_area:.0f}px)")
+        except Exception as e:
+            logger.error(f"Failed to save automatic snapshot: {e}")
 
     def _run(self):
         last_send = 0.0
@@ -941,28 +862,34 @@ class _MotionWorker:
             # Downscale for motion processing
             H, W = frame.shape[:2]
             small = cv2.resize(frame, (int(W * self._proc_scale), int(H * self._proc_scale)), interpolation=cv2.INTER_AREA)
-            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-            gray = cv2.GaussianBlur(gray, (21, 21), 0)
-
-            if self._prev_small is None:
-                self._prev_small = gray
-                continue
 
             # Load settings snapshot
             cfg = _get_motion_settings_snapshot()
-            m_thresh = int(cfg.get('threshold', 25))
-            m_kernel = int(cfg.get('kernel', 15))
-            m_iters = int(cfg.get('iterations', 2))
+            var_threshold = int(cfg.get('mog2_var_threshold', 16))
+            history = int(cfg.get('mog2_history', 500))
             min_area = int(cfg.get('min_area', 500))
             pad = int(cfg.get('pad', 10))
 
-            frame_delta = cv2.absdiff(self._prev_small, gray)
-            thresh = cv2.threshold(frame_delta, m_thresh, 255, cv2.THRESH_BINARY)[1]
-            ksize = max(1, m_kernel)
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (ksize, ksize))
-            thresh = cv2.dilate(thresh, kernel, iterations=max(0, m_iters))
+            # Initialize or reinitialize MOG2 if parameters changed
+            current_params = (var_threshold, history)
+            if self._bg_subtractor is None or self._mog2_params != current_params:
+                self._bg_subtractor = cv2.createBackgroundSubtractorMOG2(
+                    history=history,           # Learn from N frames of history
+                    varThreshold=var_threshold, # Pixel variance threshold (sensitivity)
+                    detectShadows=False         # Disable shadow detection for speed
+                )
+                self._mog2_params = current_params
+                logger.info(f"Initialized MOG2 background subtractor (history={history}, varThreshold={var_threshold})")
 
-            contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # Apply MOG2 background subtraction (replaces frame differencing)
+            fg_mask = self._bg_subtractor.apply(small)
+
+            # Optional: Light morphological filtering to reduce noise
+            # (much lighter than the old dilation approach)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
+
+            contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             motion_detected = False
             x_min = y_min = x_max = y_max = None
@@ -991,7 +918,9 @@ class _MotionWorker:
             color = (0, 0, 255) if motion_detected else (0, 255, 0)
             cv2.putText(draw_frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
 
-            self._prev_small = gray
+            # Automatic snapshot on motion detection
+            if motion_detected:
+                self._maybe_save_snapshot(draw_frame, contours, min_area)
 
             # Downscale for output if needed and encode
             H2, W2 = draw_frame.shape[:2]
@@ -1020,8 +949,6 @@ def _ensure_hubs_started():
     if _hubs_started:
         return
     raw_broadcaster.start()
-    _objects_worker.start()
-    objects_broadcaster.start()
     _motion_worker.start()
     motion_broadcaster.start()
     _hubs_started = True
@@ -1062,11 +989,6 @@ def generate_frames():
     return raw_broadcaster.multipart_stream()
 
 
-def generate_frames_with_objects():
-    """Centralized objects stream shared across clients (background inference)."""
-    return objects_broadcaster.multipart_stream()
-
-
 def _get_motion_settings_snapshot():
     with settings_lock:
         return {
@@ -1075,6 +997,8 @@ def _get_motion_settings_snapshot():
             'iterations': int(motion_detection_config.get('iterations', 2)),
             'min_area': int(motion_detection_config.get('min_area', 500)),
             'pad': int(motion_detection_config.get('pad', 10)),
+            'mog2_var_threshold': int(motion_detection_config.get('mog2_var_threshold', 16)),
+            'mog2_history': int(motion_detection_config.get('mog2_history', 500)),
         }
 
 
@@ -1092,26 +1016,9 @@ def index():
     """Root endpoint - renders the index page via helper."""
     return render_index_page()
 
-@app.route('/all_feeds')
-def all_feeds():
-    return render_all_feeds_page()
-
 @app.route('/settings', methods=['GET', 'POST'])
 def settings():
-    """Simple settings page to select YOLO classes (or All)."""
-    # Resolve available class names without running inference if possible
-    names = []
-    model = get_yolo_model()
-    try:
-        if model is not None:
-            raw_names = getattr(model, 'names', None)
-            if isinstance(raw_names, dict):
-                names = [raw_names[i] for i in sorted(raw_names.keys())]
-            elif isinstance(raw_names, (list, tuple)):
-                names = list(raw_names)
-    except Exception:
-        names = []
-
+    """Settings page for motion detection configuration."""
     if request.method == 'POST':
         # If reset button pressed, reset motion settings and redirect
         action = request.form.get('action')
@@ -1120,14 +1027,9 @@ def settings():
                 motion_detection_config.clear()
                 motion_detection_config.update(MOTION_DEFAULTS)
             try:
-                _save_config(CONFIG_PATH, object_detection_config, motion_detection_config, face_detection_config)
+                _save_config(CONFIG_PATH, motion_detection_config)
             except Exception:
                 pass
-            return redirect(url_for('settings'))
-        # faces removed: face manifest and unknowns management no-ops
-        if action == 'reset_face_manifest':
-            return redirect(url_for('settings'))
-        if action in ('promote_unknown', 'delete_unknown'):
             return redirect(url_for('settings'))
 
         # Handle OAuth2 authentication settings
@@ -1173,7 +1075,7 @@ def settings():
                 # Persist config to disk
                 try:
                     logger.info(f"Saving auth config to disk: {auth_config}")
-                    _save_config(CONFIG_PATH, object_detection_config, motion_detection_config, face_detection_config, auth_config=auth_config)
+                    _save_config(CONFIG_PATH, motion_detection_config, auth_config=auth_config)
                     logger.info("Auth config saved successfully")
                 except Exception as e:
                     logger.error(f"Failed to save auth config: {e}")
@@ -1182,14 +1084,6 @@ def settings():
 
             return redirect(url_for('settings'))
 
-        select_all_flag = ('select_all' in request.form)
-        selected = set(request.form.getlist('classes'))
-        face_archive_flag = ('face_archive_unknown' in request.form)
-        face_dedup_flag = ('face_dedup_enabled' in request.form)
-        dedup_method_in = request.form.get('face_dedup_method', '').strip().lower()
-        embed_thr_in = request.form.get('face_embedding_threshold', '')
-        min_dur_in = request.form.get('face_min_duration_sec', '')
-
         # Read motion detection sensitivity values with fallbacks
         def _to_int(val, default):
             try:
@@ -1197,64 +1091,23 @@ def settings():
             except Exception:
                 return default
 
-        th_in = _to_int(request.form.get('md_threshold', ''), motion_detection_config['threshold'])
         ma_in = _to_int(request.form.get('md_min_area', ''), motion_detection_config['min_area'])
-        ke_in = _to_int(request.form.get('md_kernel', ''), motion_detection_config['kernel'])
-        it_in = _to_int(request.form.get('md_iterations', ''), motion_detection_config['iterations'])
         pd_in = _to_int(request.form.get('md_pad', ''), motion_detection_config['pad'])
+        mog2_var_in = _to_int(request.form.get('mog2_var_threshold', ''), motion_detection_config.get('mog2_var_threshold', 16))
+        mog2_hist_in = _to_int(request.form.get('mog2_history', ''), motion_detection_config.get('mog2_history', 500))
 
         # Clamp to sane ranges
-        th_in = max(0, min(255, th_in))
         ma_in = max(0, ma_in)
-        ke_in = max(1, ke_in)
-        it_in = max(0, it_in)
         pd_in = max(0, pd_in)
+        mog2_var_in = max(8, min(30, mog2_var_in))
+        mog2_hist_in = max(200, min(1000, mog2_hist_in))
 
         with settings_lock:
-            # YOLO class selection
-            object_detection_config['select_all'] = select_all_flag
-            object_detection_config['classes'] = selected
             # Motion sensitivity
-            motion_detection_config['threshold'] = th_in
             motion_detection_config['min_area'] = ma_in
-            motion_detection_config['kernel'] = ke_in
-            motion_detection_config['iterations'] = it_in
             motion_detection_config['pad'] = pd_in
-            # Face detection
-            face_detection_config['archive_unknown'] = bool(face_archive_flag)
-            face_detection_config['dedup_enabled'] = bool(face_dedup_flag)
-            # Optional controls (we'll provide sliders in UI; keep defaults if absent)
-            dd_th = request.form.get('face_dedup_threshold')
-            cd_min = request.form.get('face_cooldown_minutes')
-            try:
-                if dd_th is not None and dd_th != '':
-                    face_detection_config['dedup_threshold'] = max(0, min(64, int(dd_th)))
-            except Exception:
-                pass
-            try:
-                if cd_min is not None and cd_min != '':
-                    face_detection_config['cooldown_minutes'] = max(0, int(cd_min))
-            except Exception:
-                pass
-            try:
-                if min_dur_in is not None and min_dur_in != '':
-                    face_detection_config['min_duration_sec'] = max(1, int(min_dur_in))
-            except Exception:
-                pass
-            # Dedup method and embedding threshold
-            if dedup_method_in in ('embedding', 'phash'):
-                face_detection_config['dedup_method'] = dedup_method_in
-            try:
-                if embed_thr_in is not None and embed_thr_in != '':
-                    face_detection_config['embedding_threshold'] = max(0.0, min(2.0, float(embed_thr_in)))
-            except Exception:
-                pass
-            # Ensure archive directory exists if enabling
-            if face_detection_config['archive_unknown']:
-                try:
-                    os.makedirs(face_detection_config['archive_dir'], exist_ok=True)
-                except Exception:
-                    pass
+            motion_detection_config['mog2_var_threshold'] = mog2_var_in
+            motion_detection_config['mog2_history'] = mog2_hist_in
             # Camera & Stream settings from form
             def _to_int2(val, default):
                 try:
@@ -1281,55 +1134,52 @@ def settings():
                 stream_config['max_width'] = max(320, _to_int2(stream_max_w_in, stream_config.get('max_width', OUTPUT_MAX_WIDTH)))
             if stream_raw_fps_in is not None and stream_raw_fps_in != '':
                 stream_config['raw_fps'] = max(1, _to_int2(stream_raw_fps_in, stream_config.get('raw_fps', RAW_TARGET_FPS)))
+
+            # Snapshot settings from form
+            snapshot_enabled_in = 'snapshot_enabled' in request.form
+            snapshot_cooldown_in = _to_int2(request.form.get('snapshot_cooldown', ''), snapshot_config.get('cooldown', 15))
+            snapshot_threshold_in = _to_int2(request.form.get('snapshot_motion_threshold', ''), snapshot_config.get('motion_threshold', 5000))
+            snapshot_dir_in = (request.form.get('snapshot_directory', '') or 'snapshots').strip()
+
+            snapshot_config['enabled'] = snapshot_enabled_in
+            snapshot_config['cooldown'] = max(5, min(60, snapshot_cooldown_in))
+            snapshot_config['motion_threshold'] = max(1000, min(20000, snapshot_threshold_in))
+            snapshot_config['directory'] = snapshot_dir_in
+
         # Apply live and persist config to disk after general update
         try:
             _apply_video_stream_settings()
         except Exception:
             pass
         try:
-            _save_config(CONFIG_PATH, object_detection_config, motion_detection_config, face_detection_config, video_config=video_config, stream_config=stream_config)
+            _save_config(CONFIG_PATH, motion_detection_config, video_config=video_config, stream_config=stream_config, snapshot_config=snapshot_config)
         except Exception:
             pass
         return redirect(url_for('settings'))
 
     with settings_lock:
-        select_all_flag = object_detection_config['select_all']
-        selected = set(object_detection_config['classes'])
-        m_thresh = motion_detection_config['threshold']
         m_min_area = motion_detection_config['min_area']
-        m_kernel = motion_detection_config['kernel']
-        m_iters = motion_detection_config['iterations']
         m_pad = motion_detection_config['pad']
-        f_archive = bool(face_detection_config['archive_unknown'])
-        f_min_dur = int(face_detection_config['min_duration_sec'])
-        f_dir = face_detection_config['archive_dir']
-        f_dedup = bool(face_detection_config.get('dedup_enabled', True))
-        f_dd_th = int(face_detection_config.get('dedup_threshold', 10))
-        f_cool = int(face_detection_config.get('cooldown_minutes', 60))
-        f_method = str(face_detection_config.get('dedup_method', 'embedding'))
-        f_embed_th = float(face_detection_config.get('embedding_threshold', 0.6))
-
-    # Build unknowns list for settings management
-    unknowns_for_ui = []
+        mog2_var_threshold = motion_detection_config.get('mog2_var_threshold', 16)
+        mog2_history = motion_detection_config.get('mog2_history', 500)
+        # Snapshot config
+        snapshot_enabled = snapshot_config.get('enabled', False)
+        snapshot_cooldown = snapshot_config.get('cooldown', 15)
+        snapshot_motion_threshold = snapshot_config.get('motion_threshold', 5000)
+        snapshot_directory = snapshot_config.get('directory', 'snapshots')
 
     # Snapshot simple route health/status
     has_frame = (camera_stream.get_frame() is not None)
     raw_ok = camera_stream.running and has_frame
     motion_ok = raw_ok  # motion depends on camera frames
-    objects_ok = (model is not None) and raw_ok
 
     page_html = render_settings_page(
-        names=names,
-        select_all_flag=select_all_flag,
-        selected=selected,
-        m_thresh=m_thresh,
         m_min_area=m_min_area,
-        m_kernel=m_kernel,
-        m_iters=m_iters,
         m_pad=m_pad,
+        mog2_var_threshold=mog2_var_threshold,
+        mog2_history=mog2_history,
         raw_ok=raw_ok,
         motion_ok=motion_ok,
-        objects_ok=objects_ok,
         device_id=str(DEVICE_ID or ''),
         port=int(APP_PORT),
         mdns_enabled=(not MDNS_DISABLE),
@@ -1346,6 +1196,10 @@ def settings():
         out_max_width=int(stream_config.get('max_width', OUTPUT_MAX_WIDTH)),
         jpeg_quality=int(stream_config.get('jpeg_quality', JPEG_QUALITY)),
         raw_fps=int(stream_config.get('raw_fps', RAW_TARGET_FPS)),
+        snapshot_enabled=snapshot_enabled,
+        snapshot_cooldown=snapshot_cooldown,
+        snapshot_motion_threshold=snapshot_motion_threshold,
+        snapshot_directory=snapshot_directory,
     )
     return page_html
 
@@ -1365,22 +1219,25 @@ def api_oauth2_test():
         })
     return jsonify({"ok": False, "error": info}), 502
 
+@app.route('/api/snapshot')
+def api_snapshot():
+    """Capture a snapshot of the current motion detection frame."""
+    frame_data = _motion_worker.get_latest()
+    if frame_data is None:
+        return jsonify({"error": "No frame available"}), 503
+
+    # Return the JPEG frame directly
+    from datetime import datetime
+    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    resp = Response(frame_data, mimetype='image/jpeg')
+    resp.headers['Content-Disposition'] = f'attachment; filename="opensentry-snapshot-{timestamp}.jpg"'
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return resp
+
 @app.route('/video_feed')
 def video_feed():
     """Video streaming route - raw feed with no processing"""
     resp = Response(generate_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
-    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0, no-transform'
-    resp.headers['Pragma'] = 'no-cache'
-    resp.headers['Expires'] = '0'
-    resp.headers['X-Accel-Buffering'] = 'no'
-    return resp
-
-
-@app.route('/video_feed_objects')
-def video_feed_objects():
-    """Video streaming route - YOLOv8n object detection overlay"""
-    resp = Response(generate_frames_with_objects(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0, no-transform'
     resp.headers['Pragma'] = 'no-cache'

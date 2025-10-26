@@ -1,6 +1,6 @@
 # OpenSentry
 
-**Turn any Linux device with a camera into a smart security system you control.**
+**Turn any Linux device with a camera into a motion detection security system you control.**
 
 Self-hosted. Privacy-first. No cloud required.
 
@@ -12,14 +12,14 @@ Self-hosted. Privacy-first. No cloud required.
 
 ## 🎯 What is OpenSentry?
 
-OpenSentry transforms any Linux device with a webcam into an intelligent security camera system. Stream live video, detect motion, and identify objects with YOLO — all processed locally on your hardware.
+OpenSentry transforms any Linux device with a webcam into a motion detection security camera. Stream live video with motion detection overlays — all processed locally on your hardware.
 
 ### Key Features
 
-- 📹 **Live Video Streaming** - Multiple feed types (raw, motion, objects)
-- 🚶 **Motion Detection** - Configurable sensitivity and detection zones
-- 🎯 **Object Detection** - YOLO-powered real-time object recognition
-- 🌐 **Web Interface** - Dark-themed, mobile-friendly dashboard
+- 📹 **Live Video Streaming** - Real-time camera feed with motion detection overlay
+- 🚶 **Motion Detection** - MOG2 background subtraction with configurable sensitivity
+- 📸 **Snapshot Capture** - Manual snapshots and automatic capture on motion events
+- 🌐 **Web Interface** - Clean, dark-themed, mobile-friendly dashboard
 - 🔐 **Flexible Authentication** - Local auth or integrate with OAuth2/OIDC providers
 - 🔍 **mDNS Discovery** - Auto-discover devices on your network
 - 🐳 **Docker Ready** - Deploy anywhere with Docker Compose
@@ -38,6 +38,7 @@ OpenSentry transforms any Linux device with a webcam into an intelligent securit
   - [OAuth2 Integration](#oauth2-integration)
 - [Configuration](#%EF%B8%8F-configuration)
 - [API & Endpoints](#-api--endpoints)
+- [Snapshot Features](#-snapshot-features)
 - [OAuth2 Setup Guide](#-oauth2-setup-guide)
 - [Discovery & mDNS](#-discovery--mdns)
 - [Troubleshooting](#-troubleshooting)
@@ -90,7 +91,6 @@ OpenSentry is designed for low CPU usage while supporting multiple simultaneous 
   - Single-slot latest-frame buffer drops backlog to keep latency low.
 - **`helpers/encoders.py`**: Uses TurboJPEG when available, otherwise OpenCV JPEG.
 - **Background workers (in `server.py`)**:
-  - `_ObjectsWorker` runs YOLOv8 at a capped FPS, overlays boxes, and publishes to `objects_broadcaster`.
   - `_MotionWorker` detects motion on downscaled frames, draws ROI, and publishes to `motion_broadcaster`.
   - Raw stream uses a lightweight producer to encode frames for `raw_broadcaster`.
 
@@ -98,7 +98,6 @@ OpenSentry is designed for low CPU usage while supporting multiple simultaneous 
 
 ```mermaid
 graph TD
-{{ ... }}
   A[Camera /dev/video0] -->|BGR frames| B[CameraStream]
 
   B --> C1[Raw Producer]
@@ -109,40 +108,80 @@ graph TD
   C2 --> D2[motion_broadcaster]
   D2 --> E2[Clients /video_feed_motion]
 
-  B --> C3[_ObjectsWorker]
-  C3 --> D3[objects_broadcaster]
-  D3 --> E3[Clients /video_feed_objects]
-
   subgraph Encoding
     X[helpers/encoders.py] -->|TurboJPEG or OpenCV| D1
     X --> D2
-    X --> D3
   end
 ```
 
 ### Concurrency & performance
 
-- **Single encode per tick** per stream type (raw/motion/objects), shared by all clients.
+- **Single encode per tick** per stream type (raw/motion), shared by all clients.
 - **Latest-frame only** buffer avoids growing queues and keeps latency low.
 - **FPS caps** for workers prevent CPU spikes; output width and JPEG quality configurable.
 - **TurboJPEG** accelerates JPEG encoding when the native lib is present.
-- Designed to support future optimizations (viewer-gated workers, motion-gated YOLO, ROI inference).
+- Optimized for lightweight motion detection with minimal CPU overhead.
 
 ---
 
 ## 📦 Installation
 
-### Requirements
+### Hardware Requirements & Performance Guide
 
+OpenSentry performs real-time motion detection with video streaming, which requires reasonable CPU and memory. Here's what to expect on different hardware:
+
+#### 🖥️ x86_64 / AMD64 (Intel/AMD PCs)
+| Hardware | Performance | Notes |
+|----------|-------------|-------|
+| **Desktop/Laptop** (2+ cores, 4GB+ RAM) | ⭐⭐⭐⭐⭐ Excellent | 30+ fps at 1080p, multiple clients, very smooth |
+| **Intel NUC / Mini PC** | ⭐⭐⭐⭐⭐ Excellent | 25-30 fps at 1080p, ideal for production |
+| **Old Desktop** (2010+, 2GB RAM) | ⭐⭐⭐⭐ Good | 15-20 fps at 720p, perfectly usable |
+
+#### 🥧 Raspberry Pi Models
+
+| Model | CPU | RAM | Performance | FPS @ 640x480 | FPS @ 1080p | Status |
+|-------|-----|-----|-------------|---------------|-------------|--------|
+| **Pi Zero W** | 1-core 1GHz ARMv6 | 512MB | ❌ Not Recommended | 1-3 fps | N/A | Too slow, frequent crashes |
+| **Pi Zero 2 W** | 4-core 1GHz ARMv8 | 512MB | ⚠️ Marginal | 5-8 fps | N/A | Usable but laggy |
+| **Pi 3B** | 4-core 1.2GHz ARMv8 | 1GB | ⭐⭐⭐ Acceptable | 10-15 fps | 5-8 fps | **Minimum recommended** |
+| **Pi 3B+** | 4-core 1.4GHz ARMv8 | 1GB | ⭐⭐⭐ Good | 12-18 fps | 8-12 fps | Solid choice |
+| **Pi 4 (2GB)** | 4-core 1.5GHz ARMv8 | 2GB | ⭐⭐⭐⭐ Very Good | 20-25 fps | 15-20 fps | Great performance |
+| **Pi 4 (4/8GB)** | 4-core 1.8GHz ARMv8 | 4-8GB | ⭐⭐⭐⭐⭐ Excellent | 25-30 fps | 18-25 fps | Recommended for production |
+| **Pi 5 (4/8GB)** | 4-core 2.4GHz ARMv8 | 4-8GB | ⭐⭐⭐⭐⭐ Excellent | 30+ fps | 25-30 fps | Best Raspberry Pi option |
+
+#### 📊 Performance Notes
+
+**FPS (Frames Per Second):**
+- **30 fps** - Smooth, real-time video (broadcast quality)
+- **15-20 fps** - Acceptable, minor stuttering
+- **10-15 fps** - Usable for security monitoring
+- **<10 fps** - Laggy, frustrating experience
+
+**Optimization Tips for Lower-End Hardware:**
+- Use 640x480 resolution (default recommended for Pi 3B/3B+)
+- Lower JPEG quality to 60-70% in settings
+- Reduce stream FPS to 10-12 in settings
+- Ensure only 1 Gunicorn worker (`GUNICORN_WORKERS=1`)
+- Use wired Ethernet instead of WiFi when possible
+
+#### 💡 Our Recommendations
+
+| Use Case | Recommended Hardware | Why |
+|----------|---------------------|-----|
+| **Budget / Testing** | Raspberry Pi 3B/3B+ | Acceptable performance at ~$25-35 used |
+| **Best Value** | Raspberry Pi 4 (2GB) | Great performance at ~$45, good for most setups |
+| **Production / Multiple Cameras** | Raspberry Pi 4/5 (4GB+) | Smooth operation, handles multiple clients |
+| **Desktop/Server** | Any modern x86_64 PC | Overkill but excellent if you have one available |
+
+#### ⚠️ Not Recommended
+- **Raspberry Pi Zero W** - Too slow (1-core ARMv6), will frustrate you
+- **Raspberry Pi 1/2** - Outdated, poor performance with modern Python/OpenCV
+- **Virtual machines with <2GB RAM** - Motion detection is memory-intensive
+
+#### ✅ Software Requirements
 - Python 3.12+ (for source installation)
 - Linux with V4L2 camera support (e.g., `/dev/video0`)
-- 1GB RAM minimum (2GB+ recommended for x86_64, 1GB sufficient for ARM/Pi)
 - Docker (optional, for containerized deployment)
-
-**Platform Support:**
-- ✅ x86_64 (Intel/AMD)
-- ✅ ARM64/aarch64 (Raspberry Pi 4/5, Jetson Nano)
-- ✅ ARMv7 (Raspberry Pi 3)
 
 ### Run from Source
 
@@ -372,16 +411,17 @@ Or click **"Use local login for now"** on the OAuth2 unavailable page.
 ```json
 {
   "device_id": "a7077099be8a",
-  "object_detection": {
-    "select_all": true,
-    "classes": []
-  },
   "motion_detection": {
-    "threshold": 25,
     "min_area": 500,
-    "kernel": 15,
-    "iterations": 2,
-    "pad": 10
+    "pad": 10,
+    "mog2_var_threshold": 16,
+    "mog2_history": 500
+  },
+  "snapshots": {
+    "enabled": false,
+    "cooldown": 15,
+    "motion_threshold": 5000,
+    "directory": "snapshots"
   },
   "auth": {
     "auth_mode": "local",
@@ -389,9 +429,32 @@ Or click **"Use local login for now"** on the OAuth2 unavailable page.
     "oauth2_client_id": "",
     "oauth2_client_secret": "",
     "oauth2_scope": "openid profile email offline_access"
+  },
+  "video": {
+    "width": 0,
+    "height": 0,
+    "fps": 15,
+    "mjpeg": true
+  },
+  "stream": {
+    "max_width": 960,
+    "jpeg_quality": 75,
+    "raw_fps": 15
   }
 }
 ```
+
+**Motion Detection Parameters:**
+- `min_area` - Minimum contour area in pixels to trigger detection (default: 500)
+- `pad` - Padding around detection boxes in pixels (default: 10)
+- `mog2_var_threshold` - MOG2 variance threshold: 8-12 for high sensitivity, 18-30 for fewer false positives (default: 16)
+- `mog2_history` - Learning period in frames: 200-500 for fast adaptation, 500-1000 for stable scenes (default: 500)
+
+**Automatic Snapshots:**
+- `enabled` - Toggle automatic snapshots on motion detection (default: false)
+- `cooldown` - Minimum seconds between snapshots to prevent spam (default: 15)
+- `motion_threshold` - Minimum total motion area in pixels to trigger snapshot (default: 5000)
+- `directory` - Directory to save snapshots, relative to app directory (default: "snapshots")
 
 ---
 
@@ -401,11 +464,9 @@ Or click **"Use local login for now"** on the OAuth2 unavailable page.
 
 | Endpoint | Description | Auth Required |
 |----------|-------------|---------------|
-| `/` | Dashboard | ✅ |
-| `/all_feeds` | Grid of all video streams | ✅ |
+| `/` | Motion detection camera dashboard | ✅ |
 | `/video_feed` | Raw camera feed (MJPEG) | ✅ |
-| `/video_feed_motion` | Motion detection overlay | ✅ |
-| `/video_feed_objects` | YOLO object detection | ✅ |
+| `/video_feed_motion` | Motion detection overlay (MJPEG) | ✅ |
 | `/settings` | Configuration page | ✅ |
 | `/health` | Health check (200 OK) | ❌ |
 
@@ -424,6 +485,7 @@ Or click **"Use local login for now"** on the OAuth2 unavailable page.
 | Endpoint | Method | Description | Auth |
 |----------|--------|-------------|------|
 | `/status` | GET | Device status JSON | Bearer token (if configured) |
+| `/api/snapshot` | GET | Capture and download current frame as JPEG | ✅ |
 | `/api/oauth2/test` | GET | Test OAuth2 connectivity | ✅ |
 
 **Example `/status` Response:**
@@ -433,18 +495,86 @@ Or click **"Use local login for now"** on the OAuth2 unavailable page.
   "name": "OpenSentry",
   "version": "0.1.0",
   "port": 5000,
-  "caps": ["raw", "motion", "objects"],
+  "caps": ["raw", "motion"],
   "routes": {
     "raw": true,
-    "motion": true,
-    "objects": true
+    "motion": true
   },
   "camera": {
     "running": true,
     "has_frame": true
   },
-  "auth_mode": "oauth2"
+  "auth_mode": "session"
 }
+```
+
+---
+
+## 📸 Snapshot Features
+
+OpenSentry provides two ways to capture snapshots from your camera feed:
+
+### Manual Snapshots
+
+Click the **"Take Snapshot"** button on the main dashboard to instantly download a JPEG image with motion detection overlays.
+
+- **Endpoint:** `/api/snapshot`
+- **Format:** JPEG with motion detection boxes and status overlay
+- **Filename:** `opensentry-snapshot-YYYY-MM-DD_HH-MM-SS.jpg`
+- **Download:** Automatically downloads to your browser's download folder
+
+### Automatic Snapshots
+
+Configure OpenSentry to automatically save snapshots when motion is detected. Perfect for security monitoring and event recording.
+
+**Configuration (Settings Page or config.json):**
+
+```json
+"snapshots": {
+  "enabled": true,
+  "cooldown": 15,
+  "motion_threshold": 5000,
+  "directory": "snapshots"
+}
+```
+
+**How It Works:**
+1. Motion is detected and total motion area is calculated
+2. If motion area exceeds `motion_threshold` (in pixels)
+3. And `cooldown` period has elapsed since last snapshot
+4. Frame is automatically saved to `snapshots/` directory
+5. Filename format: `YYYY-MM-DD_HH-MM-SS_motion.jpg`
+
+**Usage Examples:**
+
+**High Security (Capture Most Motion):**
+```json
+{
+  "cooldown": 5,
+  "motion_threshold": 2000
+}
+```
+
+**Balanced Monitoring (Default):**
+```json
+{
+  "cooldown": 15,
+  "motion_threshold": 5000
+}
+```
+
+**Critical Events Only:**
+```json
+{
+  "cooldown": 60,
+  "motion_threshold": 15000
+}
+```
+
+**Docker Volume Mounting:**
+```yaml
+volumes:
+  - ./snapshots:/app/snapshots  # Persist snapshots on host
 ```
 
 ---
@@ -610,8 +740,7 @@ OpenSentry advertises itself on the local network using mDNS (Zeroconf).
 | `id` | Persistent device ID | `a7077099be8a` |
 | `name` | Device display name | `Front Door Camera` |
 | `ver` | OpenSentry version | `0.1.0` |
-| `caps` | Capabilities | `raw,motion,objects,faces` |
-| `caps` | Capabilities | `raw,motion,objects` |
+| `caps` | Capabilities | `raw,motion` |
 | `auth` | Auth mode | `session` or `token` |
 | `api` | Available APIs | `/status,/health` |
 | `path` | Web UI path | `/` |
@@ -656,7 +785,7 @@ See [Related Projects](#-related-projects) for more info.
 2. **Verify compose.yaml has ARM optimizations**:
    ```yaml
    environment:
-     - GUNICORN_WORKERS=1
+     - GUNICORN_WORKERS=2  # 2+ workers recommended (1 for stream, 1+ for API)
      - GUNICORN_WORKER_CLASS=sync  # Critical for ARM stability
      - OPENBLAS_NUM_THREADS=1
      - OPENCV_VIDEOIO_PRIORITY_LIST=V4L2
@@ -686,16 +815,38 @@ docker logs -f opensentry
 **Solutions**:
 1. Reduce camera resolution in settings (640x480 recommended)
 2. Lower JPEG quality to 60-70%
-3. Disable object detection if not needed
-4. Ensure only 1 Gunicorn worker is used
-5. Use the lighter motion detection instead of YOLO when possible
+3. Lower stream FPS in settings
+4. Use 2 workers (default) - don't reduce to 1 as it breaks snapshots
+5. Reduce motion detection processing frequency
+6. Disable automatic snapshots if not needed
 
 ### Camera Issues
 
-**Problem**: Camera not detected or streams are blank
+**Problem**: Camera not detected or streams are blank / `can't open camera by index` error in Docker logs
 
-**Solutions:**
-1. Check camera device exists:
+**Root Cause**: USB cameras often require privileged mode in Docker due to low-level device access requirements.
+
+**Solution #1 (Most Common)**: Enable privileged mode in `compose.yaml`:
+```yaml
+services:
+  opensentry:
+    privileged: true  # Required for camera access with some USB cameras
+    devices:
+      - /dev/video0:/dev/video0
+    group_add:
+      - video
+```
+
+Then restart:
+```bash
+docker compose down
+docker compose up -d
+docker logs -f opensentry  # Should see "Opened camera device=/dev/video0"
+```
+
+**Other Solutions:**
+
+1. Check camera device exists on host:
    ```bash
    ls -l /dev/video*
    ```
@@ -707,12 +858,10 @@ docker logs -f opensentry
    v4l2-ctl -d /dev/video0 --list-formats-ext
    ```
 
-3. Docker: Ensure device mapping and group permissions:
-   ```yaml
-   devices:
-     - /dev/video0:/dev/video0
-   group_add:
-     - video
+3. Verify device is not in use:
+   ```bash
+   lsof /dev/video0
+   # If in use, stop other applications using the camera
    ```
 
 4. Check logs:
@@ -729,6 +878,29 @@ docker logs -f opensentry
    export OPENSENTRY_CAMERA_INDEX=1
    uv run server.py
    ```
+
+### Snapshot Issues
+
+**Problem**: Snapshot button hangs/loads forever in Docker (works fine when running from source)
+
+**Root Cause**: With only 1 Gunicorn worker, the video stream occupies the single worker, leaving no worker available to handle the snapshot request.
+
+**Solution**: Increase workers to 2+ in `compose.yaml`:
+```yaml
+environment:
+  - GUNICORN_WORKERS=2  # Need 2+ workers: 1 for video stream, 1+ for API requests
+```
+
+Then rebuild and restart:
+```bash
+docker compose down
+docker compose up -d --build
+```
+
+**Note**: On Raspberry Pi, 2 workers is generally safe and won't cause stability issues when using `GUNICORN_WORKER_CLASS=sync`. If you experience high CPU usage or crashes, you can:
+- Keep 2 workers but reduce camera resolution/FPS in settings
+- Disable automatic snapshots if not needed
+- Monitor with `docker stats opensentry`
 
 ### OAuth2 Issues
 
@@ -843,13 +1015,9 @@ Check actual bound port in logs:
 **Problem**: High CPU usage or slow streams
 
 **Solutions:**
-1. Reduce camera resolution in `server.py` (line ~640):
-   ```python
-   cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-   cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-   ```
+1. Reduce camera resolution via `/settings` (640x480 recommended for Raspberry Pi)
 
-2. Disable unused detection features via `/settings`
+2. Lower JPEG quality and stream FPS via `/settings`
 
 3. Increase Docker resource limits:
    ```yaml
@@ -882,9 +1050,7 @@ Check actual bound port in logs:
    export GUNICORN_WORKERS=1
    ```
 
-8. Prefer the All Feeds page only when needed or reduce global FPS/quality via `/settings`
-
-9. If network constrained, reduce `JPEG_QUALITY` and `OUTPUT_MAX_WIDTH` in settings.
+8. If network constrained, reduce `JPEG_QUALITY` and `OUTPUT_MAX_WIDTH` via `/settings`
 
 ---
 
@@ -954,7 +1120,6 @@ MIT License - See [LICENSE](LICENSE) for details.
 - [ ] Use HTTPS with reverse proxy (nginx, Traefik, Caddy)
 - [ ] Set up `OPENSENTRY_API_TOKEN` for `/status` endpoint protection
 - [ ] Enable OAuth2 for centralized authentication
-- [ ] Regular backups of `config.json` and `archives/`
 - [ ] Regular backups of `config.json`
 - [ ] Keep dependencies updated (`uv sync` or `pip install --upgrade`)
 - [ ] Monitor logs for unauthorized access attempts
@@ -992,7 +1157,9 @@ server {
 
 - ✅ **Privacy-First** - All processing happens locally, no cloud required
 - ✅ **Self-Hosted** - You control your data and infrastructure
+- ✅ **Lightweight** - Focused on motion detection for efficient resource usage
 - ✅ **Flexible Authentication** - Start simple, scale with OAuth2/SSO
+- ✅ **Network Discovery** - Auto-discover devices via mDNS
 - ✅ **Open Source** - Audit, modify, and extend as needed
 - ✅ **Production-Ready** - Used in real-world deployments
 - ✅ **Free Forever** - MIT license, no hidden costs
@@ -1000,7 +1167,7 @@ server {
 ---
 
 <p align="center">
-  <strong>Take control of your security camera system.</strong><br>
+  <strong>Take control of your motion detection camera system.</strong><br>
   <em>Self-hosted. Private. Yours.</em>
 </p>
 

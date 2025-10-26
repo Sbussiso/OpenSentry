@@ -1,13 +1,12 @@
 [project]
 name = "opensentry"
 version = "0.1.0"
-description = "Add your description here"
+description = "Network-enabled motion detection camera with mDNS discovery and optional OAuth2 authentication"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "flask>=3.1.2",
     "opencv-python-headless>=4.12.0.88",
-    "ultralytics>=8.3.204",
     "zeroconf>=0.148.0",
     "gunicorn>=22.0.0",
     "gevent>=24.2.1",

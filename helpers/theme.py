@@ -19,12 +19,11 @@ def get_css() -> str:
 
 def header_html(title: str, links: List[Tuple[str, str]] | None = None) -> str:
     """Render a standard header bar.
-    links: list of (href, label). Defaults to Home · All Feeds · Settings · Logout
+    links: list of (href, label). Defaults to Home · Settings · Logout
     """
     if links is None:
         links = [
             ("/", "Home"),
-            ("/all_feeds", "All Feeds"),
             ("/settings", "Settings"),
             ("/logout", "Logout"),
         ]

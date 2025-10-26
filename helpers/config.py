@@ -13,17 +13,15 @@ def load_config(path: str) -> Dict[str, Any] | None:
 
 def save_config(
     path: str,
-    object_detection: Dict[str, Any],
     motion_detection: Dict[str, Any],
-    face_detection: Dict[str, Any],
     device_id: str | None = None,
     auth_config: Dict[str, Any] | None = None,
     video_config: Dict[str, Any] | None = None,
     stream_config: Dict[str, Any] | None = None,
+    snapshot_config: Dict[str, Any] | None = None,
 ) -> None:
     """Save config to JSON, preserving existing top-level keys like device_id.
 
-    - Ensures set -> list conversion for classes.
     - If device_id is provided, it will be set; otherwise preserved when present.
     - If auth_config is provided, it will be merged into the saved config.
     """
@@ -35,15 +33,9 @@ def save_config(
     except Exception:
         prev = {}
 
-    # Convert non-JSON types (e.g., set -> list)
     obj = {
         **prev,
-        'object_detection': {
-            **object_detection,
-            'classes': sorted(list(object_detection.get('classes', [])))
-        },
         'motion_detection': {**motion_detection},
-        'face_detection': {**face_detection},
     }
     if device_id is not None:
         obj['device_id'] = device_id
@@ -54,6 +46,8 @@ def save_config(
         obj['video'] = {**video_config}
     if stream_config is not None:
         obj['stream'] = {**stream_config}
+    if snapshot_config is not None:
+        obj['snapshots'] = {**snapshot_config}
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w', encoding='utf-8') as f:
