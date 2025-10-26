@@ -51,7 +51,7 @@ OpenSentry transforms any Linux device with a webcam into a motion detection sec
 ### Option 1: Run from Source
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/OpenSentry.git
+git clone https://github.com/Sbussiso/OpenSentry.git
 cd OpenSentry
 
 # Start the server
@@ -161,7 +161,7 @@ OpenSentry performs real-time motion detection with video streaming, which requi
 - Use 640x480 resolution (default recommended for Pi 3B/3B+)
 - Lower JPEG quality to 60-70% in settings
 - Reduce stream FPS to 10-12 in settings
-- Ensure only 1 Gunicorn worker (`GUNICORN_WORKERS=1`)
+- Keep default configuration: 1 Gunicorn worker with gevent
 - Use wired Ethernet instead of WiFi when possible
 
 #### 💡 Our Recommendations
@@ -219,7 +219,7 @@ docker compose ps
 **First-time setup on Raspberry Pi:**
 ```bash
 # Clone the repo
-git clone https://github.com/yourusername/OpenSentry.git
+git clone https://github.com/Sbussiso/OpenSentry.git
 cd OpenSentry
 
 # Generate lockfile (uses opencv-python-headless for ARM stability)
@@ -351,7 +351,7 @@ Integrate with external OAuth2/OIDC providers for centralized authentication, SS
 1. Navigate to **Settings** → **Authentication**
 2. Select **"OAuth2 Authentication"**
 3. Enter your OAuth2 server details:
-   - **Base URL**: `http://your-oauth-server:8000`
+   - **Base URL**: `http://127.0.0.1:8000` (or your OAuth2 server address)
    - **Client ID**: `opensentry-device`
    - **Client Secret**: (optional, for confidential clients)
    - **Scope**: `openid profile email offline_access`
@@ -401,8 +401,8 @@ Or click **"Use local login for now"** on the OAuth2 unavailable page.
 | `OPENSENTRY_API_TOKEN` | Bearer token for `/status` endpoint | _(none)_ |
 | `OPENSENTRY_MDNS_DISABLE` | Disable mDNS advertisement | `0` |
 | `OPENSENTRY_VERSION` | Version metadata for discovery | `0.1.0` |
-| `GUNICORN_WORKERS` | Number of Gunicorn workers (use 1 on ARM) | `2` |
-| `GUNICORN_WORKER_CLASS` | Worker type: `sync` (ARM) or `gevent` (x86) | `gevent` |
+| `GUNICORN_WORKERS` | Number of Gunicorn workers (use 1 to prevent camera contention) | `1` |
+| `GUNICORN_WORKER_CLASS` | Worker type: `gevent` for concurrent handling, `sync` for debugging | `gevent` |
 | `GUNICORN_TIMEOUT` | Worker timeout in seconds | `60` |
 | `OPENCV_VIDEOIO_PRIORITY_LIST` | OpenCV video backend priority | `V4L2` |
 
@@ -752,7 +752,7 @@ Use the companion **OpenSentry Command** project to discover all devices on your
 
 ```bash
 # Clone OpenSentry Command
-git clone https://github.com/yourusername/OpenSentry-Command.git
+git clone https://github.com/Sbussiso/OpenSentry-Command.git
 cd OpenSentry-Command
 
 # Run discovery
@@ -782,11 +782,11 @@ See [Related Projects](#-related-projects) for more info.
    docker compose up
    ```
 
-2. **Verify compose.yaml has ARM optimizations**:
+2. **Verify compose.yaml has correct configuration**:
    ```yaml
    environment:
-     - GUNICORN_WORKERS=2  # 2+ workers recommended (1 for stream, 1+ for API)
-     - GUNICORN_WORKER_CLASS=sync  # Critical for ARM stability
+     - GUNICORN_WORKERS=1  # Single worker to prevent camera contention
+     - GUNICORN_WORKER_CLASS=gevent  # Async worker for concurrent handling
      - OPENBLAS_NUM_THREADS=1
      - OPENCV_VIDEOIO_PRIORITY_LIST=V4L2
    ```
@@ -797,9 +797,9 @@ See [Related Projects](#-related-projects) for more info.
    # Should show: opencv-python-headless (not opencv-python)
    ```
 
-**Root Cause**: `gevent` worker + `opencv-python` + OpenBLAS threading causes segfaults on ARM. The fix uses:
+**Root Cause**: Multiple workers + `opencv-python` + OpenBLAS threading causes camera contention and segfaults on ARM. The fix uses:
 - `opencv-python-headless` (more stable on ARM)
-- `sync` worker instead of `gevent`
+- Single worker with `gevent` for concurrent request handling
 - Single-threaded OpenBLAS
 
 **Problem**: Camera initialization is slow on Raspberry Pi
@@ -816,7 +816,7 @@ docker logs -f opensentry
 1. Reduce camera resolution in settings (640x480 recommended)
 2. Lower JPEG quality to 60-70%
 3. Lower stream FPS in settings
-4. Use 2 workers (default) - don't reduce to 1 as it breaks snapshots
+4. Keep default configuration (1 worker with gevent handles concurrency efficiently)
 5. Reduce motion detection processing frequency
 6. Disable automatic snapshots if not needed
 
@@ -881,14 +881,15 @@ docker logs -f opensentry  # Should see "Opened camera device=/dev/video0"
 
 ### Snapshot Issues
 
-**Problem**: Snapshot button hangs/loads forever in Docker (works fine when running from source)
+**Problem**: Snapshot button hangs/loads forever
 
-**Root Cause**: With only 1 Gunicorn worker, the video stream occupies the single worker, leaving no worker available to handle the snapshot request.
+**Root Cause**: Using `sync` workers causes blocking - the video stream occupies the worker, preventing snapshot requests from being handled.
 
-**Solution**: Increase workers to 2+ in `compose.yaml`:
+**Solution**: Use `gevent` worker class in `compose.yaml` (default configuration):
 ```yaml
 environment:
-  - GUNICORN_WORKERS=2  # Need 2+ workers: 1 for video stream, 1+ for API requests
+  - GUNICORN_WORKERS=1  # Single worker to prevent camera contention
+  - GUNICORN_WORKER_CLASS=gevent  # Async worker allows concurrent requests
 ```
 
 Then rebuild and restart:
@@ -897,10 +898,10 @@ docker compose down
 docker compose up -d --build
 ```
 
-**Note**: On Raspberry Pi, 2 workers is generally safe and won't cause stability issues when using `GUNICORN_WORKER_CLASS=sync`. If you experience high CPU usage or crashes, you can:
-- Keep 2 workers but reduce camera resolution/FPS in settings
-- Disable automatic snapshots if not needed
-- Monitor with `docker stats opensentry`
+**How it works**:
+- `gevent` uses greenlets to handle multiple concurrent requests within a single worker
+- Video streams and API requests (like snapshots) can be processed simultaneously
+- No camera contention since only one worker accesses the camera device
 
 ### OAuth2 Issues
 
@@ -1045,9 +1046,10 @@ Check actual bound port in logs:
    export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
    ```
 
-7. Keep Gunicorn workers to 1 for best efficiency with shared broadcasters
+7. Use default configuration (1 worker with gevent) for best efficiency
    ```bash
    export GUNICORN_WORKERS=1
+   export GUNICORN_WORKER_CLASS=gevent
    ```
 
 8. If network constrained, reduce `JPEG_QUALITY` and `OUTPUT_MAX_WIDTH` via `/settings`
@@ -1066,7 +1068,7 @@ Central dashboard to discover, monitor, and manage all OpenSentry devices on you
 - 🌐 Unified access to all cameras
 - 🔐 OAuth2 integration for SSO
 
-[View Project →](https://github.com/yourusername/OpenSentry-Command)
+[View Project →](https://github.com/Sbussiso/OpenSentry-Command)
 
 ### LOauth2 (OAuth2 Server)
 **Self-Hosted OAuth2 / OIDC Authorization Server**
@@ -1097,8 +1099,8 @@ uv run server.py
 
 Contributions welcome! Whether it's bug reports, feature requests, or code contributions.
 
-- 🐛 **Report bugs**: [Open an issue](https://github.com/yourusername/OpenSentry/issues)
-- 💡 **Request features**: [Start a discussion](https://github.com/yourusername/OpenSentry/discussions)
+- 🐛 **Report bugs**: [Open an issue](https://github.com/Sbussiso/OpenSentry/issues)
+- 💡 **Request features**: [Start a discussion](https://github.com/Sbussiso/OpenSentry/discussions)
 - 🔧 **Submit code**: Fork, develop, and create a pull request
 
 ---
@@ -1131,7 +1133,7 @@ MIT License - See [LICENSE](LICENSE) for details.
 ```nginx
 server {
     listen 443 ssl http2;
-    server_name opensentry.yourdomain.com;
+    server_name opensentry.example.com;
 
     ssl_certificate /path/to/cert.pem;
     ssl_certificate_key /path/to/key.pem;
