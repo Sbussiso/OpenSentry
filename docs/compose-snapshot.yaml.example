@@ -1,0 +1,79 @@
+# Docker Compose for OpenSentry - SMV (Snapshot Motion Version)
+# Optimized for low-power devices like Raspberry Pi Zero W / Zero 2 W
+# This configuration enables snapshot-only mode to minimize CPU/memory usage
+
+services:
+  opensentry-snapshot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # platform: linux/arm/v6    # For Pi Zero W (ARMv6)
+      # platform: linux/arm64      # For Pi Zero 2 W, Pi 3/4/5 (ARMv8)
+    image: opensentry-smv:snapshot
+    container_name: opensentry-snapshot
+    ports:
+      - "${OPENSENTRY_PORT:-5000}:${OPENSENTRY_PORT:-5000}"
+    environment:
+      # Authentication (change in production!)
+      - OPENSENTRY_USER=admin
+      - OPENSENTRY_PASS=admin
+      - OPENSENTRY_SECRET=please-change-me-in-production
+      - OPENSENTRY_LOG_LEVEL=INFO
+      - OPENSENTRY_PORT=${OPENSENTRY_PORT:-5000}
+
+      # Snapshot capture interval (this is snapshot-only version)
+      - OPENSENTRY_SNAPSHOT_INTERVAL=10  # Capture every 10 seconds
+
+      # Gunicorn configuration (single worker, sync mode for simplicity)
+      - GUNICORN_WORKERS=1
+      - GUNICORN_TIMEOUT=120
+      - GUNICORN_WORKER_CLASS=sync  # Sync mode for snapshot-only
+
+      # Thread limits to reduce CPU contention (critical for Pi Zero W)
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
+
+      # Camera configuration optimized for low-power
+      - OPENSENTRY_CAMERA_WIDTH=320        # Very low resolution for Pi Zero W
+      - OPENSENTRY_CAMERA_HEIGHT=240
+      - OPENSENTRY_CAMERA_FPS=5            # Minimal FPS
+      - OPENSENTRY_CAMERA_MJPEG=1          # Use hardware MJPEG if available
+
+      # JPEG compression settings
+      - OPENSENTRY_JPEG_QUALITY=60         # Lower quality = less CPU
+      - OPENSENTRY_OUTPUT_MAX_WIDTH=640    # Limit output size
+
+      # OpenCV configuration
+      - OPENCV_VIDEOIO_PRIORITY_LIST=V4L2
+      # - OPENCV_VIDEOIO_DEBUG=1           # Uncomment for debugging
+
+    volumes:
+      - /dev:/dev
+      - ./snapshots:/app/snapshots          # Persist snapshots on host
+      # - ./config.json:/app/config.json    # Optional: mount custom config
+
+    devices:
+      - /dev/video0:/dev/video0
+      # - /dev/video1:/dev/video1           # Add more cameras if needed
+
+    group_add:
+      - video
+
+    device_cgroup_rules:
+      - 'c 81:* rmw'
+
+    security_opt:
+      - seccomp:unconfined
+
+    restart: unless-stopped
+    privileged: true  # Required for camera access with some USB cameras
+
+# Optional: Use healthcheck to monitor container
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

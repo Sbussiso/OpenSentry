@@ -24,7 +24,8 @@ def test_status_without_token_ok_when_no_token_configured():
     assert "name" in data and isinstance(data["name"], str)
     assert "version" in data and isinstance(data["version"], str)
     assert "routes" in data and isinstance(data["routes"], dict)
-    assert set(["raw","motion","objects"]).issubset(set(data["routes"].keys()))
+    # In snapshot mode, we only have snapshots route
+    assert "snapshots" in data["routes"]
     assert "camera" in data and isinstance(data["camera"], dict)
     assert set(["running","has_frame"]).issubset(set(data["camera"].keys()))
 

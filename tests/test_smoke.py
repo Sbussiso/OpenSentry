@@ -41,30 +41,28 @@ def _login_session():
     return s
 
 
-def test_video_feed_stream_headers_and_chunk():
+def test_snapshot_latest_returns_image():
     s = _login_session()
-    r = s.get(f"{BASE}/video_feed", stream=True, timeout=10)
+    r = s.get(f"{BASE}/api/snapshots/latest", timeout=10)
     assert r.status_code == 200
     ct = r.headers.get("Content-Type", "")
-    assert ct.startswith("multipart/x-mixed-replace")
-    assert r.headers.get("X-Accel-Buffering") == "no"
+    assert ct.startswith("image/jpeg")
     # Custom headers present
     assert "Server" in r.headers
-    # read one small chunk to verify stream emits data
-    chunk = next(r.iter_content(chunk_size=1024))
-    assert b"--frame" in chunk or b"Content-Type: image/jpeg" in chunk
-    r.close()
+    # Verify it's a valid JPEG image (starts with JPEG magic bytes)
+    content = r.content
+    assert len(content) > 100  # Should be a real image
+    assert content[:2] == b'\xff\xd8'  # JPEG magic bytes
 
 
-def test_video_feed_motion_stream_headers_and_chunk():
+def test_snapshot_list_returns_json():
     s = _login_session()
-    r = s.get(f"{BASE}/video_feed_motion", stream=True, timeout=10)
+    r = s.get(f"{BASE}/api/snapshots/list", timeout=10)
     assert r.status_code == 200
     ct = r.headers.get("Content-Type", "")
-    assert ct.startswith("multipart/x-mixed-replace")
-    assert r.headers.get("X-Accel-Buffering") == "no"
+    assert "application/json" in ct
     # Custom headers present
     assert "Server" in r.headers
-    chunk = next(r.iter_content(chunk_size=1024))
-    assert b"--frame" in chunk or b"Content-Type: image/jpeg" in chunk
-    r.close()
+    data = r.json()
+    assert "snapshots" in data
+    assert isinstance(data["snapshots"], list)

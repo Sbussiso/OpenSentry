@@ -1,0 +1,21 @@
+{
+  "device_id": "a7077099be8a",
+  "motion_detection": {
+    "min_area": 500,
+    "pad": 10
+  },
+  "snapshot_config": {
+    "interval": 10,
+    "motion_detection": true,
+    "retention_count": 100,
+    "retention_days": 7,
+    "directory": "snapshots"
+  },
+  "auth": {
+    "auth_mode": "local",
+    "oauth2_base_url": "",
+    "oauth2_client_id": "",
+    "oauth2_client_secret": "",
+    "oauth2_scope": "openid profile email offline_access"
+  }
+}
